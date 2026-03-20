@@ -1,0 +1,6 @@
+PyMuPDF
+pypdfium2
+pdf2image
+Pillow
+PyYAML
+python-dotenv

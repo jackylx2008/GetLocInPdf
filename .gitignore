@@ -46,6 +46,7 @@ htmlcov/
 .conda/
 output/
 .env
+poppler*/
 .coverage.*
 .cache
 nosetests.xml

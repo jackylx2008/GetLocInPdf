@@ -6,6 +6,8 @@ pdf:
   path: ${PDF_PATH}  # PDF 目录路径
   file: ${PDF_FILE}  # PDF 文件全路径
   keywords: ["C.L1M2.M060"]  # 增加更多关键字测试
+  # pdf2image (Poppler) 路径，Windows 建议配置，例如 "C:/poppler/bin"
+  poppler_path: ${POPPLER_PATH} 
   # 配置全图截图绝对坐标 (x1, y1, x2, y2)
   full_page_rect:
     x1: ${FULL_PAGE_RECT_X1}
