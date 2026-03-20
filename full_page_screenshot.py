@@ -96,7 +96,7 @@ def capture_keyword_screenshot(
                 pix = page.get_pixmap(clip=clip, matrix=matrix)
                 output_path = os.path.join(
                     output_dir,
-                    f"{output_filename_base}_{keyword}_p{page_num+1}.png",
+                    f"{output_filename_base}_{keyword}_全图截图.png",
                 )
                 pix.save(output_path)
                 logging.info(f"截图已保存至: {output_path}")

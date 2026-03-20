@@ -1,0 +1,27 @@
+# 日志配置
+log_level: ${LOG_LEVEL}  # 日志级别: DEBUG, INFO, WARNING, ERROR, CRITICAL
+
+# PDF 配置
+pdf:
+  path: ${PDF_PATH}  # PDF 目录路径
+  file: ${PDF_FILE}  # PDF 文件全路径
+  keywords: ["C.L1M2.M060"]  # 增加更多关键字测试
+  # 配置全图截图绝对坐标 (x1, y1, x2, y2)
+  full_page_rect:
+    x1: ${FULL_PAGE_RECT_X1}
+    y1: ${FULL_PAGE_RECT_Y1}
+    x2: ${FULL_PAGE_RECT_X2}
+    y2: ${FULL_PAGE_RECT_Y2}
+  # 关键词红色边框范围 (相对于中心偏移)
+  full_page_keyword_border:
+    x1: ${FULL_PAGE_BORDER_X1}
+    y1: ${FULL_PAGE_BORDER_Y1}
+    x2: ${FULL_PAGE_BORDER_X2}
+    y2: ${FULL_PAGE_BORDER_Y2}
+  full_page_border_width: ${FULL_PAGE_BORDER_WIDTH}
+  dpi: ${DPI}
+
+# 统计信息配置
+output:
+  directory: ${OUTPUT_DIR}  # 输出目录
+  filename: ${OUTPUT_FILENAME}  # 输出文件名
