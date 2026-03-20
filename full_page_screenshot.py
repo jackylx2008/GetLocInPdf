@@ -119,7 +119,7 @@ def main():
     full_page_rect = config["pdf"].get("full_page_rect")
     full_page_keyword_border = config["pdf"].get("full_page_keyword_border")
     full_page_border_width = config["pdf"].get("full_page_border_width", 1.5)
-    dpi = config["pdf"].get("dpi", 300)
+    full_page_dpi = config["pdf"].get("full_page_dpi", 300)
     output_dir = config["output"]["directory"]
     output_base = os.path.splitext(config["output"]["filename"])[0]
 
@@ -131,7 +131,7 @@ def main():
 
     logging.info(f"开始处理 PDF: {pdf_file}")
     logging.info(f"搜索关键字: {keywords}")
-    logging.info(f"截图 DPI: {dpi}")
+    logging.info(f"截图 DPI: {full_page_dpi}")
     if full_page_rect:
         logging.info(f"设置全图截图区域: {full_page_rect}")
     if full_page_keyword_border:
@@ -146,7 +146,7 @@ def main():
         full_page_rect,
         full_page_keyword_border,
         full_page_border_width,
-        dpi,
+        full_page_dpi,
     )
 
 

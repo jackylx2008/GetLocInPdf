@@ -19,7 +19,23 @@ pdf:
     x2: ${FULL_PAGE_BORDER_X2}
     y2: ${FULL_PAGE_BORDER_Y2}
   full_page_border_width: ${FULL_PAGE_BORDER_WIDTH}
-  dpi: ${DPI}
+  full_page_dpi: ${DPI}
+
+  # 区域截图范围 (基于关键字中心的偏移量)
+  region_rect:
+    x1: ${REGION_RECT_X1}
+    y1: ${REGION_RECT_Y1}
+    x2: ${REGION_RECT_X2}
+    y2: ${REGION_RECT_Y2}
+  # 区域截图中的关键字边框 (基于关键字中心偏移量)
+  region_keyword_border:
+    x1: ${REGION_BORDER_X1}
+    y1: ${REGION_BORDER_Y1}
+    x2: ${REGION_BORDER_X2}
+    y2: ${REGION_BORDER_Y2}
+  region_border_width: ${REGION_BORDER_WIDTH}
+  region_border_opacity: ${REGION_BORDER_OPACITY}
+  region_dpi: ${REGION_DPI}
 
 # 统计信息配置
 output:
