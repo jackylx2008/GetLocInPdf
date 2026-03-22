@@ -94,24 +94,6 @@ GetLocInPdf/
 截图保存在 `output/` 目录，日志保存在 `logs/` 目录。
 文件名格式：`{文件名}_{关键字}_P{页码}_截图类型.png`。
 
-- 对旋转页面，项目内部已做坐标转换
-- `region_screenshot.py` 和 `region_screenshot_pypdfium2.py` 当前都能正确处理旋转页截图
-
-## 推荐方案
-
-如果你的目标是“坐标准确 + 局部截图清晰”，推荐优先使用：
-
-```bash
-python region_screenshot_pypdfium2.py
-```
-
-原因：
-
-- 关键字定位仍然使用 `PyMuPDF`，坐标准确
-- 实际截图渲染使用 `pypdfium2`，观感通常优于 `PyMuPDF`
-- 只渲染目标区域，不像 `pdf2image` 那样必须先整页高 DPI 渲染
-- 对大图纸、高 DPI 局部截图更友好
-
 ## 常见问题
 
 ### 1. 找不到关键字
@@ -125,27 +107,4 @@ python region_screenshot_pypdfium2.py
 - 再调整 `.env` 中的 `REGION_RECT_*` 或 `FULL_PAGE_RECT_*`
 - 局部截图范围是相对关键字中心点的偏移，不是绝对坐标
 
-### 3. `pdf2image` 高 DPI 失败
-
-这是整页高分辨率渲染带来的限制，建议改用：
-
-```bash
-python region_screenshot_pypdfium2.py
-```
-
-### 4. `POPPLER_PATH` 报错
-
-只影响 `region_screenshot_pdf2image.py`。
-请确认它指向 Poppler 的 `bin` 目录，例如：
-
-```text
-D:/poppler/Library/bin
-```
-
-## 当前建议
-
-日常使用建议：
-
-1. 用 `get_pdf_info.py` 确认页面尺寸
-2. 用 `full_page_screenshot.py` 调整全图范围
 3. 用 `region_screenshot_pypdfium2.py` 生成最终局部截图
