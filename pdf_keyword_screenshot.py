@@ -249,6 +249,7 @@ class NearestLineBoxDetector:
         center_y = (keyword_rect.y0 + keyword_rect.y1) / 2
         vertical_lines, horizontal_lines = self._collect_lines(page)
         projection_tolerance = max(1.0, float(self.config.axis_tolerance) * 2)
+        primary_min_length = float(self.config.min_length)
 
         left = self._pick_vertical_boundary(
             vertical_lines,
@@ -256,6 +257,7 @@ class NearestLineBoxDetector:
             center_y,
             direction="left",
             projection_tolerance=projection_tolerance,
+            min_length=primary_min_length,
         )
         right = self._pick_vertical_boundary(
             vertical_lines,
@@ -263,23 +265,42 @@ class NearestLineBoxDetector:
             center_y,
             direction="right",
             projection_tolerance=projection_tolerance,
+            min_length=primary_min_length,
         )
-        top = self._pick_horizontal_boundary(
+
+        if not all((left, right)):
+            return None
+
+        top = self._pick_horizontal_closing_boundary(
+            horizontal_lines,
+            left,
+            right,
+            center_y,
+            direction="up",
+        ) or self._pick_horizontal_boundary(
             horizontal_lines,
             center_x,
             center_y,
             direction="up",
             projection_tolerance=projection_tolerance,
+            min_length=primary_min_length,
         )
-        bottom = self._pick_horizontal_boundary(
+        bottom = self._pick_horizontal_closing_boundary(
+            horizontal_lines,
+            left,
+            right,
+            center_y,
+            direction="down",
+        ) or self._pick_horizontal_boundary(
             horizontal_lines,
             center_x,
             center_y,
             direction="down",
             projection_tolerance=projection_tolerance,
+            min_length=primary_min_length,
         )
 
-        if not all((left, right, top, bottom)):
+        if not all((top, bottom)):
             return None
         if left.axis_value >= right.axis_value or top.axis_value >= bottom.axis_value:
             return None
@@ -303,7 +324,7 @@ class NearestLineBoxDetector:
             return cached
 
         axis_tolerance = float(self.config.axis_tolerance)
-        min_length = float(self.config.min_length)
+        min_length = min(5.0, float(self.config.min_length))
         vertical_lines: dict[tuple[str, float, float, float], AxisAlignedLine] = {}
         horizontal_lines: dict[tuple[str, float, float, float], AxisAlignedLine] = {}
 
@@ -355,10 +376,13 @@ class NearestLineBoxDetector:
         center_y: float,
         direction: str,
         projection_tolerance: float,
+        min_length: float,
     ) -> AxisAlignedLine | None:
         candidates: list[tuple[float, float, float, AxisAlignedLine]] = []
 
         for line in lines:
+            if line.length < min_length:
+                continue
             if not line.covers(center_y, projection_tolerance):
                 continue
 
@@ -385,10 +409,13 @@ class NearestLineBoxDetector:
         center_y: float,
         direction: str,
         projection_tolerance: float,
+        min_length: float,
     ) -> AxisAlignedLine | None:
         candidates: list[tuple[float, float, float, AxisAlignedLine]] = []
 
         for line in lines:
+            if line.length < min_length:
+                continue
             if not line.covers(center_x, projection_tolerance):
                 continue
 
@@ -407,6 +434,62 @@ class NearestLineBoxDetector:
         if not candidates:
             return None
         return min(candidates)[3]
+
+    def _pick_horizontal_closing_boundary(
+        self,
+        lines: Sequence[AxisAlignedLine],
+        left: AxisAlignedLine,
+        right: AxisAlignedLine,
+        center_y: float,
+        direction: str,
+    ) -> AxisAlignedLine | None:
+        interval_start = left.axis_value
+        interval_end = right.axis_value
+        endpoint_tolerance = max(2.5, float(self.config.axis_tolerance) * 6)
+        candidates: list[tuple[float, float, float, AxisAlignedLine]] = []
+
+        for line in lines:
+            if direction == "up":
+                distance = center_y - line.axis_value
+            else:
+                distance = line.axis_value - center_y
+
+            if distance <= 0 or distance > float(self.config.search_margin):
+                continue
+
+            left_gap = self._line_edge_gap(line, interval_start)
+            right_gap = self._line_edge_gap(line, interval_end)
+            if left_gap > endpoint_tolerance or right_gap > endpoint_tolerance:
+                continue
+
+            overlap = min(line.span_end, interval_end) - max(line.span_start, interval_start)
+            if overlap <= 0:
+                continue
+
+            candidates.append(
+                (
+                    distance,
+                    left_gap + right_gap,
+                    -overlap,
+                    line.axis_value,
+                    line.span_start,
+                    line.span_end,
+                    line,
+                )
+            )
+
+        if not candidates:
+            return None
+        return min(candidates)[6]
+
+    @staticmethod
+    def _line_edge_gap(line: AxisAlignedLine, boundary_value: float) -> float:
+        if line.covers(boundary_value):
+            return 0.0
+        return min(
+            abs(line.span_start - boundary_value),
+            abs(line.span_end - boundary_value),
+        )
 
 
 class PdfKeywordDocument:
