@@ -197,7 +197,7 @@ class PdfPageRenderer:
             clip_rect.y0,
         )
         bitmap = pdfium_page.render(
-            scale=int(round(self.scale)),
+            scale=self.scale,
             crop=crop,
             rev_byteorder=True,
         )
@@ -212,16 +212,23 @@ class PdfPageRenderer:
     ) -> Image.Image:
         color = ColorHelper.normalize(border_style.color)
         alpha = max(0, min(255, int(round(float(border_style.opacity) * 255))))
+        effective_scale_x = (
+            image.width / clip_rect.width if clip_rect.width > 0 else self.scale
+        )
+        effective_scale_y = (
+            image.height / clip_rect.height if clip_rect.height > 0 else self.scale
+        )
         local_rect = fitz.Rect(
-            (border_rect.x0 - clip_rect.x0) * self.scale,
-            (border_rect.y0 - clip_rect.y0) * self.scale,
-            (border_rect.x1 - clip_rect.x0) * self.scale,
-            (border_rect.y1 - clip_rect.y0) * self.scale,
+            (border_rect.x0 - clip_rect.x0) * effective_scale_x,
+            (border_rect.y0 - clip_rect.y0) * effective_scale_y,
+            (border_rect.x1 - clip_rect.x0) * effective_scale_x,
+            (border_rect.y1 - clip_rect.y0) * effective_scale_y,
         )
         local_rect.normalize()
 
         overlay = Image.new("RGBA", image.size, (0, 0, 0, 0))
-        width_px = max(1, int(round(float(border_style.width) * self.scale)))
+        effective_scale = max(effective_scale_x, effective_scale_y)
+        width_px = max(1, int(round(float(border_style.width) * effective_scale)))
         fill_rgba = (*color, alpha) if border_style.fill else None
 
         draw = ImageDraw.Draw(overlay, "RGBA")
