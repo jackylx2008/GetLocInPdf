@@ -1,6 +1,6 @@
 # GetLocInPdf
 
-在 PDF 中搜索关键字，并在图中标记并生成截图。项目已全面切换至 `pypdfium2` 作为核心 PDF 渲染引擎，以提供更高的渲染质量和更好的高 DPI 支持。
+在 PDF 中搜索关键字，并在图中标记并生成截图。项目当前采用 `pypdfium2` 负责 PDF 渲染，采用 `PyMuPDF` 负责文本检索、页面几何信息读取与坐标处理。
 
 ## 功能概览
 
@@ -8,6 +8,8 @@
   搜索关键字后，在指定的“全图区域”（可通过配置定义，如页面主体或忽略边距）生成截图，并在图中绘制关键字红框。
 - **[region_screenshot.py](region_screenshot.py)**  
   搜索关键字后，以关键字中心为原点，根据配置的偏移量生成局部区域截图，并在图中绘制关键字红框（支持透明度配置）。
+- **[pdf_keyword_screenshot.py](pdf_keyword_screenshot.py)**  
+  公共截图模块，封装 `PyMuPDF` 检索与坐标处理、`pypdfium2` 渲染和边框绘制逻辑，供其他脚本直接调用。
 - **[get_pdf_info.py](get_pdf_info.py)**  
   辅助工具，输出 PDF 每页的原始尺寸（Points），用于辅助配置 `config.yaml` 中的坐标范围。
 
@@ -18,50 +20,37 @@
   ```bash
   pip install pymupdf pypdfium2 pillow pyyaml python-dotenv
   ```
+  其中 `pymupdf` 用于检索和坐标处理，`pypdfium2` 用于截图渲染。
 
 ## 核心配置 (config.yaml)
 
-项目使用 `config.yaml` 结合 `.env` 环境变量进行配置。
+项目通过 `config.yaml` 配合 `.env` 驱动。所有坐标单位均为 PDF 标准点 `Points (1/72 inch)`。
 
-### DPI 设置 (关键)
+关键字段：
 
-DPI（每英寸点数）直接决定了输出图片的清晰度和文件大小。项目支持为不同截图模式独立设置 DPI：
-
-- **全页截图 DPI (`full_page_dpi`)**：
-  在 `config.yaml` 中通过 `${DPI}` 环境变量注入。
-  - 建议值：`100` - `300`。
-  - 影响：控制 [full_page_screenshot.py](full_page_screenshot.py) 生成图片的精细度。
-
-- **区域截图 DPI (`region_dpi`)**：
-  在 `config.yaml` 中通过 `${REGION_DPI}` 环境变量注入。
-  - 建议值：`1000` - `1200`（由于局部截图范围较小，通常可以使用更高 DPI 以获得极高清晰度）。
-  - 影响：控制 [region_screenshot.py](region_screenshot.py) 生成图片的精细度。
-
-### 坐标与边框配置
-
-所有坐标单位均为 PDF 标准点 (Points, 1/72 inch)。
-
-1.  **全图区域 (`full_page_rect`)**：
-    指定要截取的页面范围。例如，若只想截取图纸中间部分，可设置 `x1, y1` 为左上角坐标，`x2, y2` 为右下角坐标。
-2.  **区域偏移 (`region_rect`)**：
-    基于关键字中心的偏移。例如 `x1: -50, y1: -50, x2: 50, y2: 50` 将截取以关键字为中心、宽高各 100 点的方形区域。
-3.  **关键字红框 (`keyword_border`)**：
-    - `x1, y1, x2, y2`：相对于关键字中心的偏移，定义红框的大小。
-    - `width`：边框线宽（按 DPI 自动缩放）。
-    - `opacity`：仅在区域截图模式支持，设置红框的透明度（0.0 - 1.0）。
+- `pdf.file`：目标 PDF 文件路径。
+- `pdf.keywords`：待搜索的关键字列表。
+- `pdf.full_page_rect`：全图截图的绝对区域。
+- `pdf.region_rect`：区域截图相对于关键字中心的偏移区域。
+- `pdf.full_page_keyword_border` / `pdf.region_keyword_border`：关键字边框相对于中心点的偏移范围。
+- `pdf.full_page_dpi` / `pdf.region_dpi`：两种截图模式的 DPI。全图通常用 `100-300`，区域通常用 `1000-1200`。
+- `pdf.*_border_width`：边框线宽，会按 DPI 自动缩放。
+- `pdf.*_border_opacity`：边框透明度，范围 `0.0-1.0`。
+- `pdf.*_border_color`：边框颜色，支持 RGB 元组或十六进制字符串，如 `#FF0000`。
 
 ## 项目结构
 
 ```text
 GetLocInPdf/
-├─ config.yaml           # 结构化配置文件
-├─ .env                  # 环境变量（路径、DPI、开关等）
-├─ full_page_screenshot.py # 全图/大区截图脚本
-├─ region_screenshot.py    # 局部区域截图脚本
-├─ get_pdf_info.py       # 查看 PDF 页面尺寸工具
-├─ logging_config.py     # 日志格式定义
-├─ output/               # 截图结果输出目录
-└─ logs/                 # 运行日志
+├─ config.yaml                 # 主配置
+├─ .env                        # 路径、DPI 等环境变量
+├─ pdf_keyword_screenshot.py   # 公共截图核心
+├─ full_page_screenshot.py     # 全图截图入口
+├─ region_screenshot.py        # 区域截图入口
+├─ get_pdf_info.py             # 页面尺寸查看工具
+├─ logging_config.py           # 日志配置
+├─ output/                     # 截图输出目录
+└─ logs/                       # 日志输出目录
 ```
 
 ## 配置指南
@@ -84,11 +73,39 @@ GetLocInPdf/
 ## 使用方法
 
 ### 1. 查看 PDF 页面尺寸
-使用 `python get_pdf_info.py` 获取页面宽高，辅助配置 `config.yaml` 中的坐标。
+使用 `python get_pdf_info.py` 获取页面宽高，辅助配置 `config.yaml` 中的坐标。这个工具通过 `PyMuPDF` 读取 PDF 页面尺寸，不参与截图渲染。
 
 ### 2. 生成截图
 - 运行 `python full_page_screenshot.py` 生成全页/大区截图。
 - 运行 `python region_screenshot.py` 生成局部截图。
+
+### 3. 在其他脚本中直接调用
+```python
+from pdf_keyword_screenshot import (
+    BorderStyle,
+    capture_full_page_screenshots,
+    capture_region_screenshots,
+)
+
+capture_full_page_screenshots(
+    pdf_path="demo.pdf",
+    keywords=["C.L1M2.M060"],
+    output_dir="output",
+    output_filename_base="demo",
+    dpi=300,
+    border_style=BorderStyle(color="#FF0000", opacity=0.8),
+)
+
+capture_region_screenshots(
+    pdf_path="demo.pdf",
+    keywords=["C.L1M2.M060"],
+    output_dir="output",
+    output_filename_base="demo",
+    region_rect={"x1": -80, "y1": -40, "x2": 80, "y2": 40},
+    dpi=1200,
+    border_style=BorderStyle(color=(255, 0, 0), opacity=0.35, fill=True),
+)
+```
 
 ## 输出结果
 截图保存在 `output/` 目录，日志保存在 `logs/` 目录。
@@ -106,5 +123,3 @@ GetLocInPdf/
 - 先运行 `get_pdf_info.py` 查看页面尺寸
 - 再调整 `.env` 中的 `REGION_RECT_*` 或 `FULL_PAGE_RECT_*`
 - 局部截图范围是相对关键字中心点的偏移，不是绝对坐标
-
-3. 用 `region_screenshot_pypdfium2.py` 生成最终局部截图

@@ -45,7 +45,8 @@ htmlcov/
 # User-specific
 .conda/
 output/
-.env
+.env*
+common.env
 poppler*/
 .coverage.*
 .cache

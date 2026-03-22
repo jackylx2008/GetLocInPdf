@@ -1,10 +1,10 @@
-import fitz  # PyMuPDF
+import fitz  # PyMuPDF，用于读取 PDF 页面尺寸信息
 import os
 import yaml
 from dotenv import load_dotenv
 
 # 加载环境变量
-load_dotenv()
+load_dotenv(dotenv_path="common.env")
 
 
 def load_config(config_path="config.yaml"):
