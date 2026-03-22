@@ -33,6 +33,8 @@
 - `pdf.full_page_rect`：全图截图的绝对区域。
 - `pdf.region_rect`：区域截图相对于关键字中心的偏移区域。
 - `pdf.full_page_keyword_border` / `pdf.region_keyword_border`：关键字边框相对于中心点的偏移范围。
+- `pdf.region_border_mode`：区域截图边框模式，支持 `nearest_line_box` 和 `fixed`。
+- `pdf.region_line_min_length` / `pdf.region_line_axis_tolerance` / `pdf.region_line_search_margin`：区域截图自动检索矢量边框时的线段过滤与搜索参数。
 - `pdf.full_page_dpi` / `pdf.region_dpi`：两种截图模式的 DPI。全图通常用 `100-300`，区域通常用 `1000-1200`。
 - `pdf.*_border_width`：边框线宽，会按 DPI 自动缩放。
 - `pdf.*_border_opacity`：边框透明度，范围 `0.0-1.0`。
@@ -69,6 +71,7 @@ GetLocInPdf/
 - `pdf.full_page_rect`: 全图截图的绝对坐标范围。
 - `pdf.region_rect`: 局部区域截图相对于关键字中心点的偏移量。
 - `pdf.region_keyword_border`: 关键字红框相对于中心点的偏移量。
+- `pdf.region_border_mode`: 区域截图红框模式，默认优先按关键词中心向四个方向检索最近的水平 / 垂直矢量线。
 
 ## 使用方法
 

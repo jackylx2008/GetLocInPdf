@@ -47,6 +47,33 @@ class PageContext:
     pdfium_page: pdfium.PdfPage
 
 
+@dataclass(frozen=True)
+class LineBoxDetectionConfig:
+    """区域截图中基于矢量线自动识别红框的配置。"""
+
+    mode: str = "nearest_line_box"
+    min_length: float = 20.0
+    axis_tolerance: float = 0.5
+    search_margin: float = 200.0
+
+
+@dataclass(frozen=True)
+class AxisAlignedLine:
+    """归一化后的水平 / 垂直线段。"""
+
+    orientation: str
+    axis_value: float
+    span_start: float
+    span_end: float
+
+    @property
+    def length(self) -> float:
+        return self.span_end - self.span_start
+
+    def covers(self, value: float, tolerance: float = 0.0) -> bool:
+        return (self.span_start - tolerance) <= value <= (self.span_end + tolerance)
+
+
 class ConfigLoader:
     """配置加载器。"""
 
@@ -72,6 +99,12 @@ class OutputManager:
 
 class RectHelper:
     """PDF 坐标与截图区域辅助工具。"""
+
+    @staticmethod
+    def to_render_point(page: fitz.Page, point: fitz.Point) -> fitz.Point:
+        if page.rotation == 0:
+            return fitz.Point(point)
+        return fitz.Point(point) * page.rotation_matrix
 
     @staticmethod
     def to_render_rect(page: fitz.Page, rect: fitz.Rect) -> fitz.Rect:
@@ -199,6 +232,181 @@ class PdfPageRenderer:
             width=width_px,
         )
         return Image.alpha_composite(image, overlay)
+
+
+class NearestLineBoxDetector:
+    """根据关键词中心向四个方向检索最近的水平 / 垂直边线。"""
+
+    def __init__(self, config: LineBoxDetectionConfig | None = None) -> None:
+        self.config = config or LineBoxDetectionConfig()
+        self._page_line_cache: dict[int, tuple[list[AxisAlignedLine], list[AxisAlignedLine]]] = {}
+
+    def detect(self, page: fitz.Page, keyword_rect: fitz.Rect) -> fitz.Rect | None:
+        if self.config.mode != "nearest_line_box":
+            return None
+
+        center_x = (keyword_rect.x0 + keyword_rect.x1) / 2
+        center_y = (keyword_rect.y0 + keyword_rect.y1) / 2
+        vertical_lines, horizontal_lines = self._collect_lines(page)
+        projection_tolerance = max(1.0, float(self.config.axis_tolerance) * 2)
+
+        left = self._pick_vertical_boundary(
+            vertical_lines,
+            center_x,
+            center_y,
+            direction="left",
+            projection_tolerance=projection_tolerance,
+        )
+        right = self._pick_vertical_boundary(
+            vertical_lines,
+            center_x,
+            center_y,
+            direction="right",
+            projection_tolerance=projection_tolerance,
+        )
+        top = self._pick_horizontal_boundary(
+            horizontal_lines,
+            center_x,
+            center_y,
+            direction="up",
+            projection_tolerance=projection_tolerance,
+        )
+        bottom = self._pick_horizontal_boundary(
+            horizontal_lines,
+            center_x,
+            center_y,
+            direction="down",
+            projection_tolerance=projection_tolerance,
+        )
+
+        if not all((left, right, top, bottom)):
+            return None
+        if left.axis_value >= right.axis_value or top.axis_value >= bottom.axis_value:
+            return None
+
+        border_rect = fitz.Rect(
+            left.axis_value,
+            top.axis_value,
+            right.axis_value,
+            bottom.axis_value,
+        )
+        border_rect.normalize()
+        return border_rect
+
+    def _collect_lines(
+        self,
+        page: fitz.Page,
+    ) -> tuple[list[AxisAlignedLine], list[AxisAlignedLine]]:
+        page_number = int(page.number)
+        cached = self._page_line_cache.get(page_number)
+        if cached is not None:
+            return cached
+
+        axis_tolerance = float(self.config.axis_tolerance)
+        min_length = float(self.config.min_length)
+        vertical_lines: dict[tuple[str, float, float, float], AxisAlignedLine] = {}
+        horizontal_lines: dict[tuple[str, float, float, float], AxisAlignedLine] = {}
+
+        for drawing in page.get_cdrawings():
+            for item in drawing.get("items", []):
+                if item[0] != "l":
+                    continue
+
+                start = RectHelper.to_render_point(page, fitz.Point(item[1]))
+                end = RectHelper.to_render_point(page, fitz.Point(item[2]))
+                delta_x = abs(start.x - end.x)
+                delta_y = abs(start.y - end.y)
+
+                if delta_x <= axis_tolerance and delta_y >= min_length:
+                    axis_value = round((start.x + end.x) / 2, 2)
+                    span_start = round(min(start.y, end.y), 2)
+                    span_end = round(max(start.y, end.y), 2)
+                    line = AxisAlignedLine(
+                        orientation="vertical",
+                        axis_value=axis_value,
+                        span_start=span_start,
+                        span_end=span_end,
+                    )
+                    vertical_lines[
+                        ("vertical", axis_value, span_start, span_end)
+                    ] = line
+                elif delta_y <= axis_tolerance and delta_x >= min_length:
+                    axis_value = round((start.y + end.y) / 2, 2)
+                    span_start = round(min(start.x, end.x), 2)
+                    span_end = round(max(start.x, end.x), 2)
+                    line = AxisAlignedLine(
+                        orientation="horizontal",
+                        axis_value=axis_value,
+                        span_start=span_start,
+                        span_end=span_end,
+                    )
+                    horizontal_lines[
+                        ("horizontal", axis_value, span_start, span_end)
+                    ] = line
+
+        cached_lines = (list(vertical_lines.values()), list(horizontal_lines.values()))
+        self._page_line_cache[page_number] = cached_lines
+        return cached_lines
+
+    def _pick_vertical_boundary(
+        self,
+        lines: Sequence[AxisAlignedLine],
+        center_x: float,
+        center_y: float,
+        direction: str,
+        projection_tolerance: float,
+    ) -> AxisAlignedLine | None:
+        candidates: list[tuple[float, float, float, AxisAlignedLine]] = []
+
+        for line in lines:
+            if not line.covers(center_y, projection_tolerance):
+                continue
+
+            if direction == "left":
+                distance = center_x - line.axis_value
+            else:
+                distance = line.axis_value - center_x
+
+            if distance <= 0 or distance > float(self.config.search_margin):
+                continue
+
+            candidates.append(
+                (distance, -line.length, line.axis_value, line)
+            )
+
+        if not candidates:
+            return None
+        return min(candidates)[3]
+
+    def _pick_horizontal_boundary(
+        self,
+        lines: Sequence[AxisAlignedLine],
+        center_x: float,
+        center_y: float,
+        direction: str,
+        projection_tolerance: float,
+    ) -> AxisAlignedLine | None:
+        candidates: list[tuple[float, float, float, AxisAlignedLine]] = []
+
+        for line in lines:
+            if not line.covers(center_x, projection_tolerance):
+                continue
+
+            if direction == "up":
+                distance = center_y - line.axis_value
+            else:
+                distance = line.axis_value - center_y
+
+            if distance <= 0 or distance > float(self.config.search_margin):
+                continue
+
+            candidates.append(
+                (distance, -line.length, line.axis_value, line)
+            )
+
+        if not candidates:
+            return None
+        return min(candidates)[3]
 
 
 class PdfKeywordDocument:
@@ -399,6 +607,7 @@ class RegionScreenshotJob(KeywordScreenshotJob):
         region_rect: RectConfig,
         border_rect: RectConfig | None = None,
         border_style: BorderStyle | None = None,
+        line_box_detection: LineBoxDetectionConfig | None = None,
         dpi: float = 300,
     ) -> None:
         super().__init__(
@@ -411,6 +620,7 @@ class RegionScreenshotJob(KeywordScreenshotJob):
         )
         self.region_rect = region_rect
         self.border_rect = border_rect
+        self.line_box_detector = NearestLineBoxDetector(line_box_detection)
 
     def default_border_style(self) -> BorderStyle:
         return BorderStyle(fill=True)
@@ -498,7 +708,20 @@ class RegionScreenshotJob(KeywordScreenshotJob):
         source_inst: fitz.Rect,
         render_inst: fitz.Rect,
     ) -> fitz.Rect:
+        auto_border_rect = self.line_box_detector.detect(page.fitz_page, render_inst)
+        if auto_border_rect is not None:
+            logging.info(
+                "第 %s 页使用就近矢量线边框: %s",
+                page.page_number,
+                auto_border_rect,
+            )
+            return auto_border_rect
+
         if not self.border_rect:
+            logging.warning(
+                "第 %s 页未找到就近矢量线边框，已回退到关键字原始框。",
+                page.page_number,
+            )
             return fitz.Rect(render_inst)
 
         source_center_x, source_center_y = self._keyword_center(source_inst)
@@ -506,6 +729,10 @@ class RegionScreenshotJob(KeywordScreenshotJob):
             source_center_x,
             source_center_y,
             self.border_rect,
+        )
+        logging.warning(
+            "第 %s 页未找到就近矢量线边框，已回退到配置边框。",
+            page.page_number,
         )
         return RectHelper.to_render_rect(page.fitz_page, source_border_rect)
 
@@ -551,6 +778,7 @@ def capture_region_screenshots(
     region_rect: RectConfig,
     border_rect: RectConfig | None = None,
     border_style: BorderStyle | None = None,
+    line_box_detection: LineBoxDetectionConfig | None = None,
     dpi: float = 300,
 ) -> list[ScreenshotResult]:
     """兼容旧调用方式的区域截图入口。"""
@@ -562,5 +790,6 @@ def capture_region_screenshots(
         region_rect=region_rect,
         border_rect=border_rect,
         border_style=border_style,
+        line_box_detection=line_box_detection,
         dpi=dpi,
     ).run()
