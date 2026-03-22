@@ -1,102 +1,69 @@
 # GetLocInPdf
 
-在 PDF 中搜索关键字，并按配置截图。
-
-当前项目主要用于：
-- 在 PDF 中搜索指定关键字
-- 生成带关键字红框的全图截图
-- 生成以关键字中心为基准的局部区域截图
-
-项目内同时提供了多种渲染方案，推荐优先使用 `pypdfium2` 版本。
+在 PDF 中搜索关键字，并在图中标记并生成截图。项目已全面切换至 `pypdfium2` 作为核心 PDF 渲染引擎，以提供更高的渲染质量和更好的高 DPI 支持。
 
 ## 功能概览
 
-- `full_page_screenshot.py`
-  搜索关键字后，输出指定全图区域截图，并在图中标记关键字位置。
-
-- `region_screenshot.py`
-  使用 `PyMuPDF` 渲染局部区域截图。
-  坐标准确，但渲染观感一般。
-
-- `region_screenshot_pdf2image.py`
-  使用 `pdf2image + Poppler` 渲染局部区域截图。
-  渲染效果较好，但大页面高 DPI 时容易受整页渲染尺寸限制。
-
-- `region_screenshot_pypdfium2.py`
-  使用 `PyMuPDF` 搜索关键字，使用 `pypdfium2` 直接渲染局部区域。
-  这是当前推荐方案，兼顾坐标准确性和高 DPI 局部渲染能力。
-
-- `get_pdf_info.py`
-  输出 PDF 每页尺寸，辅助配置截图范围。
+- **[full_page_screenshot.py](full_page_screenshot.py)**  
+  搜索关键字后，在指定的“全图区域”（可通过配置定义，如页面主体或忽略边距）生成截图，并在图中绘制关键字红框。
+- **[region_screenshot.py](region_screenshot.py)**  
+  搜索关键字后，以关键字中心为原点，根据配置的偏移量生成局部区域截图，并在图中绘制关键字红框（支持透明度配置）。
+- **[get_pdf_info.py](get_pdf_info.py)**  
+  辅助工具，输出 PDF 每页的原始尺寸（Points），用于辅助配置 `config.yaml` 中的坐标范围。
 
 ## 环境要求
 
 - Python 3.10+
-- Windows 已验证
+- 依赖项：
+  ```bash
+  pip install pymupdf pypdfium2 pillow pyyaml python-dotenv
+  ```
 
-已用到的 Python 包：
+## 核心配置 (config.yaml)
 
-```bash
-pip install pymupdf pypdfium2 pdf2image pillow pyyaml python-dotenv
-```
+项目使用 `config.yaml` 结合 `.env` 环境变量进行配置。
 
-如果需要使用 `region_screenshot_pdf2image.py`，还需要安装 Poppler，并在 `.env` 中配置 `POPPLER_PATH`。
+### DPI 设置 (关键)
+
+DPI（每英寸点数）直接决定了输出图片的清晰度和文件大小。项目支持为不同截图模式独立设置 DPI：
+
+- **全页截图 DPI (`full_page_dpi`)**：
+  在 `config.yaml` 中通过 `${DPI}` 环境变量注入。
+  - 建议值：`100` - `300`。
+  - 影响：控制 [full_page_screenshot.py](full_page_screenshot.py) 生成图片的精细度。
+
+- **区域截图 DPI (`region_dpi`)**：
+  在 `config.yaml` 中通过 `${REGION_DPI}` 环境变量注入。
+  - 建议值：`1000` - `1200`（由于局部截图范围较小，通常可以使用更高 DPI 以获得极高清晰度）。
+  - 影响：控制 [region_screenshot.py](region_screenshot.py) 生成图片的精细度。
+
+### 坐标与边框配置
+
+所有坐标单位均为 PDF 标准点 (Points, 1/72 inch)。
+
+1.  **全图区域 (`full_page_rect`)**：
+    指定要截取的页面范围。例如，若只想截取图纸中间部分，可设置 `x1, y1` 为左上角坐标，`x2, y2` 为右下角坐标。
+2.  **区域偏移 (`region_rect`)**：
+    基于关键字中心的偏移。例如 `x1: -50, y1: -50, x2: 50, y2: 50` 将截取以关键字为中心、宽高各 100 点的方形区域。
+3.  **关键字红框 (`keyword_border`)**：
+    - `x1, y1, x2, y2`：相对于关键字中心的偏移，定义红框的大小。
+    - `width`：边框线宽（按 DPI 自动缩放）。
+    - `opacity`：仅在区域截图模式支持，设置红框的透明度（0.0 - 1.0）。
 
 ## 项目结构
 
 ```text
 GetLocInPdf/
-├─ config.yaml
-├─ .env
-├─ full_page_screenshot.py
-├─ region_screenshot.py
-├─ region_screenshot_pdf2image.py
-├─ region_screenshot_pypdfium2.py
-├─ get_pdf_info.py
-├─ logging_config.py
-├─ output/
-└─ logs/
+├─ config.yaml           # 结构化配置文件
+├─ .env                  # 环境变量（路径、DPI、开关等）
+├─ full_page_screenshot.py # 全图/大区截图脚本 (pypdfium2)
+├─ region_screenshot.py    # 关键字中心区域截图脚本 (pypdfium2)
+├─ get_pdf_info.py       # 查看 PDF 页面尺寸工具
+├─ logging_config.py     # 日志格式定义
+├─ output/               # 截图结果输出目录
+└─ logs/                 # 运行日志
 ```
 
-## 配置方式
-
-项目通过 `config.yaml` 读取结构化配置，再用 `.env` 注入实际值。
-
-### 1. `.env`
-
-示例：
-
-```env
-LOG_LEVEL=INFO
-PDF_PATH=D:/your/pdf/folder/
-PDF_FILE=D:/your/pdf/folder/example.pdf
-OUTPUT_DIR=./output
-OUTPUT_FILENAME=result.png
-
-FULL_PAGE_RECT_X1=280
-FULL_PAGE_RECT_Y1=800
-FULL_PAGE_RECT_X2=2800
-FULL_PAGE_RECT_Y2=1650
-
-FULL_PAGE_BORDER_X1=-20
-FULL_PAGE_BORDER_Y1=-10
-FULL_PAGE_BORDER_X2=20
-FULL_PAGE_BORDER_Y2=10
-FULL_PAGE_BORDER_WIDTH=3
-DPI=600
-
-REGION_RECT_X1=-50
-REGION_RECT_Y1=-80
-REGION_RECT_X2=50
-REGION_RECT_Y2=50
-
-REGION_BORDER_X1=-10
-REGION_BORDER_Y1=-5
-REGION_BORDER_X2=10
-REGION_BORDER_Y2=5
-REGION_BORDER_WIDTH=1.5
-REGION_BORDER_OPACITY=0.5
-REGION_DPI=1000
 
 POPPLER_PATH=D:/path/to/poppler/Library/bin
 ```

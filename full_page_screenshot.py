@@ -1,8 +1,10 @@
 import fitz  # PyMuPDF
+import pypdfium2 as pdfium
 import os
 import yaml
 import shutil
 from dotenv import load_dotenv
+from PIL import Image, ImageDraw
 import logging
 from logging_config import setup_logger
 
@@ -20,6 +22,91 @@ def load_config(config_path="config.yaml"):
         return yaml.safe_load(content)
 
 
+def to_render_rect(page, rect):
+    """将 search_for 返回的坐标转换为渲染后页面的坐标系。"""
+    if page.rotation == 0:
+        return fitz.Rect(rect)
+
+    p1 = fitz.Point(rect.x0, rect.y0) * page.rotation_matrix
+    p2 = fitz.Point(rect.x1, rect.y1) * page.rotation_matrix
+    render_rect = fitz.Rect(p1, p2)
+    render_rect.normalize()
+    return render_rect
+
+
+def centered_rect(center_x, center_y, rect_cfg):
+    """根据中心点和偏移配置生成矩形。"""
+    rect = fitz.Rect(
+        center_x + float(rect_cfg["x1"]),
+        center_y + float(rect_cfg["y1"]),
+        center_x + float(rect_cfg["x2"]),
+        center_y + float(rect_cfg["y2"]),
+    )
+    rect.normalize()
+    return rect
+
+
+def clamp_rect(rect, page_width, page_height):
+    """将区域限制在页面范围内。"""
+    bounded = fitz.Rect(rect)
+    bounded.intersect(fitz.Rect(0, 0, page_width, page_height))
+    bounded.normalize()
+    return bounded
+
+
+def render_clip_with_pdfium(pdfium_page, clip_rect, dpi):
+    """使用 pypdfium2 渲染指定区域。"""
+    page_width, page_height = pdfium_page.get_size()
+    clip_rect = clamp_rect(clip_rect, page_width, page_height)
+    if clip_rect.is_empty or clip_rect.width <= 0 or clip_rect.height <= 0:
+        return None, clip_rect
+
+    crop = (
+        clip_rect.x0,
+        page_height - clip_rect.y1,
+        page_width - clip_rect.x1,
+        clip_rect.y0,
+    )
+
+    bitmap = pdfium_page.render(
+        scale=float(dpi) / 72.0,
+        crop=crop,
+        rev_byteorder=True,
+    )
+    return bitmap.to_pil().convert("RGBA"), clip_rect
+
+
+def draw_border_on_screenshot(
+    img,
+    clip_rect,
+    border_rect,
+    border_width,
+    dpi,
+):
+    """在截图上绘制关键字红框。"""
+    scale = float(dpi) / 72.0
+
+    local_rect = fitz.Rect(
+        (border_rect.x0 - clip_rect.x0) * scale,
+        (border_rect.y0 - clip_rect.y0) * scale,
+        (border_rect.x1 - clip_rect.x0) * scale,
+        (border_rect.y1 - clip_rect.y0) * scale,
+    )
+    local_rect.normalize()
+
+    overlay = Image.new("RGBA", img.size, (0, 0, 0, 0))
+    width_px = max(1, int(round(float(border_width) * scale)))
+
+    draw = ImageDraw.Draw(overlay, "RGBA")
+    draw.rectangle(
+        [local_rect.x0, local_rect.y0, local_rect.x1, local_rect.y1],
+        outline=(255, 0, 0, 255),
+        width=width_px,
+    )
+
+    return Image.alpha_composite(img, overlay)
+
+
 def capture_keyword_screenshot(
     pdf_path,
     keywords,
@@ -31,77 +118,82 @@ def capture_keyword_screenshot(
     dpi=300,
 ):
     """
-    在 PDF 中搜索关键字并在指定全图区域内截图，同时为关键字绘制红色边框
+    在 PDF 中搜索关键字并在指定全图区域内截图，同时为关键字绘制红色边框。
+    搜索坐标使用 PyMuPDF，区域渲染使用 pypdfium2。
     """
     if not os.path.exists(pdf_path):
         logging.error(f"PDF 文件不存在: {pdf_path}")
         return
 
-    doc = fitz.open(pdf_path)
-
+    fitz_doc = fitz.open(pdf_path)
+    pdfium_doc = pdfium.PdfDocument(pdf_path)
     found_count = 0
 
-    # 计算缩放倍数 (72 是 PDF 默认 DPI)
-    zoom = float(dpi) / 72
-    matrix = fitz.Matrix(zoom, zoom)
+    try:
+        for page_num in range(len(fitz_doc)):
+            fitz_page = fitz_doc.load_page(page_num)
+            pdfium_page = pdfium_doc[page_num]
 
-    for page_num in range(len(doc)):
-        page = doc[page_num]
+            # 定义截图区域
+            if full_page_rect_cfg:
+                full_page_rect = fitz.Rect(
+                    float(full_page_rect_cfg["x1"]),
+                    float(full_page_rect_cfg["y1"]),
+                    float(full_page_rect_cfg["x2"]),
+                    float(full_page_rect_cfg["y2"]),
+                )
+            else:
+                full_page_rect = fitz_page.rect  # 默认全页
 
-        # 定义截图区域
-        if full_page_rect_cfg:
-            full_page_rect = fitz.Rect(
-                float(full_page_rect_cfg["x1"]),
-                float(full_page_rect_cfg["y1"]),
-                float(full_page_rect_cfg["x2"]),
-                float(full_page_rect_cfg["y2"]),
-            )
-        else:
-            full_page_rect = page.rect  # 默认全页
+            # 搜索关键字
+            for keyword in keywords:
+                text_instances = fitz_page.search_for(keyword)
+                if not text_instances:
+                    continue
 
-        # 搜索关键字
-        for keyword in keywords:
-            text_instances = page.search_for(keyword)
+                # 渲染基础截图
+                page_img, clip_rect = render_clip_with_pdfium(
+                    pdfium_page, full_page_rect, dpi
+                )
+                if page_img is None:
+                    continue
 
-            if text_instances:
                 # 在页面上绘制红色边框
-                for inst in text_instances:
+                for idx, inst in enumerate(text_instances):
+                    render_inst = to_render_rect(fitz_page, inst)
                     if border_cfg:
                         # 基于中心偏移绘制边框
-                        center_x = (inst.x0 + inst.x1) / 2
-                        center_y = (inst.y0 + inst.y1) / 2
-                        draw_rect = fitz.Rect(
-                            center_x + float(border_cfg["x1"]),
-                            center_y + float(border_cfg["y1"]),
-                            center_x + float(border_cfg["x2"]),
-                            center_y + float(border_cfg["y2"]),
-                        )
+                        center_x = (render_inst.x0 + render_inst.x1) / 2
+                        center_y = (render_inst.y0 + render_inst.y1) / 2
+                        draw_rect = centered_rect(center_x, center_y, border_cfg)
                     else:
                         # 默认直接包裹关键字
-                        draw_rect = inst
+                        draw_rect = render_inst
 
-                    page.draw_rect(
-                        draw_rect, color=(1, 0, 0), width=float(border_width)
+                    page_img = draw_border_on_screenshot(
+                        page_img,
+                        clip_rect,
+                        draw_rect,
+                        border_width,
+                        dpi,
                     )
                     found_count += 1
                     logging.info(
                         f"在第 {page_num + 1} 页找到关键字 '{keyword}' 并以自定义范围绘制边框"
                     )
 
-                # 截图（基于 full_page_rect）
-                # 注意：draw_rect 后需要重新获取像素图才能包含图形
-                clip = full_page_rect
-                clip.intersect(page.rect)
-
-                pix = page.get_pixmap(clip=clip, matrix=matrix)
+                # 保存截图
                 output_path = os.path.join(
                     output_dir,
-                    f"{output_filename_base}_{keyword}_全图截图.png",
+                    f"{output_filename_base}_{keyword}_P{page_num + 1}_全图截图.png",
                 )
-                pix.save(output_path)
+                page_img.convert("RGB").save(output_path)
                 logging.info(f"截图已保存至: {output_path}")
 
-    doc.close()
+    finally:
+        fitz_doc.close()
+        pdfium_doc.close()
+
     if found_count == 0:
         logging.warning("未找到任何关键字。")
     else:
