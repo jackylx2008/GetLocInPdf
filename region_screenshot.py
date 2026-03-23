@@ -76,7 +76,7 @@ def main():
 
     if not region_rect:
         logging.error(
-            "未在配置中找到 region_rect (区域截图范围)，请检查 config.yaml 和 .env"
+            "未配置区域截图范围，请在 config.yaml 或 .env 中提供 pdf.region_rect。"
         )
         return
 

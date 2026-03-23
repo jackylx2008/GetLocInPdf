@@ -4,7 +4,7 @@ import os
 import shutil
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import Any, Mapping, Sequence
+from typing import Any, Mapping, Sequence, cast
 
 import fitz  # PyMuPDF，用于文本检索、页面几何信息和坐标处理
 import pypdfium2 as pdfium
@@ -177,14 +177,16 @@ class ColorHelper:
         if isinstance(color, str):
             value = color.strip().lstrip("#")
             if len(value) != 6:
-                raise ValueError(f"不支持的颜色格式: {color}")
+                raise ValueError(
+                    f"不支持的颜色格式: {color}。请使用 '#RRGGBB' 或长度为 3 的 RGB 序列。"
+                )
             # pylint: disable=use-list-literal
             rgb = tuple(int(value[i : i + 2], 16) for i in (0, 2, 4))
             return (rgb[0], rgb[1], rgb[2])
 
         values = tuple(int(channel) for channel in color)
         if len(values) != 3:
-            raise ValueError(f"颜色必须包含 3 个通道: {color}")
+            raise ValueError(f"颜色配置必须包含 3 个通道 (RGB): {color}")
         processed = tuple(max(0, min(255, channel)) for channel in values)
         return (processed[0], processed[1], processed[2])
 
@@ -213,7 +215,7 @@ class PdfPageRenderer:
             clip_rect.y0,
         )
         bitmap = pdfium_page.render(
-            scale=self.scale,
+            scale=cast(Any, self.scale),
             crop=crop,
             rev_byteorder=True,
         )
@@ -554,7 +556,7 @@ class NearestLineBoxDetector:
             min_length=primary_min_length,
         )
 
-        if not all((left, right)):
+        if left is None or right is None:
             return None
 
         top = self._pick_horizontal_closing_boundary(
@@ -586,7 +588,7 @@ class NearestLineBoxDetector:
             min_length=primary_min_length,
         )
 
-        if not all((top, bottom)):
+        if top is None or bottom is None:
             return None
         if left.axis_value >= right.axis_value or top.axis_value >= bottom.axis_value:
             return None
@@ -1087,7 +1089,9 @@ class NearestLineBoxDetector:
         interval_start = left.axis_value
         interval_end = right.axis_value
         endpoint_tolerance = max(2.5, float(self.config.axis_tolerance) * 6)
-        candidates: list[tuple[float, float, float, AxisAlignedLine]] = []
+        candidates: list[
+            tuple[float, float, float, float, float, float, AxisAlignedLine]
+        ] = []
 
         for line in lines:
             if direction == "up":
@@ -1192,10 +1196,10 @@ class KeywordScreenshotJob(ABC):
 
     def run(self) -> list[ScreenshotResult]:
         if not os.path.exists(self.pdf_path):
-            logging.error("PDF 文件不存在: %s", self.pdf_path)
+            logging.error("未找到 PDF 文件，请检查输入路径: %s", self.pdf_path)
             return []
         if not self.keywords:
-            logging.warning("未提供任何关键字，已跳过截图。")
+            logging.warning("未提供任何关键字，截图任务已跳过。")
             return []
 
         OutputManager.prepare(self.output_dir)
@@ -1270,7 +1274,7 @@ class FullPageScreenshotJob(KeywordScreenshotJob):
                 page_clip_rect,
             )
             if base_img is None:
-                logging.warning("第 %s 页截图区域无效，已跳过。", page.page_number)
+                logging.warning("第 %s 页的全图截图区域无效，已跳过该页。", page.page_number)
                 continue
 
             for keyword in self.keywords:
@@ -1314,7 +1318,7 @@ class FullPageScreenshotJob(KeywordScreenshotJob):
                 logging.info("截图已保存至: %s", output_path)
 
         if total_matches == 0:
-            logging.warning("未找到任何关键字。")
+            logging.warning("未找到任何关键字匹配结果。")
         else:
             logging.info(
                 "处理完成，共找到 %s 处关键字，输出 %s 张全图截图。",
@@ -1340,7 +1344,7 @@ class FullPageScreenshotJob(KeywordScreenshotJob):
 
         if not self.border_rect:
             logging.warning(
-                "第 %s 页全图截图未找到就近矢量线边框，已回退到关键字原始框。",
+                "第 %s 页全图截图未找到可用的就近矢量线边框，已回退为关键字原始框。",
                 page.page_number,
             )
             return fitz.Rect(render_inst)
@@ -1352,7 +1356,7 @@ class FullPageScreenshotJob(KeywordScreenshotJob):
             self.border_rect,
         )
         logging.warning(
-            "第 %s 页全图截图未找到就近矢量线边框，已回退到配置边框。",
+            "第 %s 页全图截图未找到可用的就近矢量线边框，已回退为配置边框。",
             page.page_number,
         )
         return RectHelper.to_render_rect(page.fitz_page, source_border_rect)
@@ -1418,7 +1422,7 @@ class RegionScreenshotJob(KeywordScreenshotJob):
                         or clip_rect.height <= 0
                     ):
                         logging.error(
-                            "第 %s 页关键字 '%s' 的截图区域无效: %s",
+                            "第 %s 页关键字 '%s' 对应的区域截图范围无效，已跳过该匹配: %s",
                             page.page_number,
                             keyword,
                             clip_rect,
@@ -1431,7 +1435,7 @@ class RegionScreenshotJob(KeywordScreenshotJob):
                     )
                     if region_img is None:
                         logging.error(
-                            "第 %s 页关键字 '%s' 渲染失败。",
+                            "第 %s 页关键字 '%s' 的区域截图渲染失败。",
                             page.page_number,
                             keyword,
                         )
@@ -1469,7 +1473,7 @@ class RegionScreenshotJob(KeywordScreenshotJob):
                     )
 
         if not results:
-            logging.warning("未找到任何关键字。")
+            logging.warning("未找到任何关键字匹配结果。")
         else:
             logging.info("处理完成，共生成 %s 张区域截图。", len(results))
         return results
@@ -1491,7 +1495,7 @@ class RegionScreenshotJob(KeywordScreenshotJob):
 
         if not self.border_rect:
             logging.warning(
-                "第 %s 页未找到就近矢量线边框，已回退到关键字原始框。",
+                "第 %s 页未找到可用的就近矢量线边框，已回退为关键字原始框。",
                 page.page_number,
             )
             return fitz.Rect(render_inst)
@@ -1503,7 +1507,7 @@ class RegionScreenshotJob(KeywordScreenshotJob):
             self.border_rect,
         )
         logging.warning(
-            "第 %s 页未找到就近矢量线边框，已回退到配置边框。",
+            "第 %s 页未找到可用的就近矢量线边框，已回退为配置边框。",
             page.page_number,
         )
         return RectHelper.to_render_rect(page.fitz_page, source_border_rect)

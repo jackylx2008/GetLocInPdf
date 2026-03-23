@@ -1,3 +1,5 @@
+"""页面矢量线缓存与批量预建工具。"""
+
 import hashlib
 import json
 import logging
@@ -115,7 +117,7 @@ class LineCacheStore:
             with open(cache_path, "w", encoding="utf-8") as file:
                 json.dump(payload, file, ensure_ascii=True)
         except OSError:
-            logging.debug("矢量线缓存写入失败: %s", cache_path, exc_info=True)
+            logging.debug("矢量线缓存写入失败，将继续使用即时提取结果: %s", cache_path, exc_info=True)
 
     def _cache_path(
         self,
@@ -162,8 +164,8 @@ def collect_page_axis_lines(
     axis_tolerance: float,
     min_length: float,
 ) -> tuple[list[AxisAlignedLine], list[AxisAlignedLine]]:
-    vertical_lines: dict[tuple[str, float, float, float], AxisAlignedLine] = {}
-    horizontal_lines: dict[tuple[str, float, float, float], AxisAlignedLine] = {}
+    vertical_lines: dict[tuple[str, float, float, float, str | None], AxisAlignedLine] = {}
+    horizontal_lines: dict[tuple[str, float, float, float, str | None], AxisAlignedLine] = {}
 
     for drawing in page.get_drawings():
         layer = drawing.get("layer")
@@ -218,7 +220,10 @@ def get_page_axis_lines(
     memory_cache: dict[int, tuple[list[AxisAlignedLine], list[AxisAlignedLine]]] | None = None,
     force_rebuild: bool = False,
 ) -> tuple[tuple[list[AxisAlignedLine], list[AxisAlignedLine]], str]:
-    page_number = int(page.number)
+    page_number_value = page.number
+    if page_number_value is None:
+        raise ValueError("无法确定当前页面编号。")
+    page_number = int(page_number_value)
     normalized_min_length = normalize_line_cache_min_length(min_length)
 
     if memory_cache is not None:
@@ -280,6 +285,11 @@ def build_pdf_line_cache(
     force_rebuild: bool = False,
 ) -> dict[str, int | float | str]:
     pdf_abspath = os.path.abspath(pdf_path)
+    if not os.path.exists(pdf_abspath):
+        raise FileNotFoundError(f"未找到 PDF 文件: {pdf_abspath}")
+    if not os.path.isfile(pdf_abspath):
+        raise ValueError(f"提供的 PDF 路径不是文件: {pdf_abspath}")
+
     cache_store = LineCacheStore(cache_dir=cache_dir, enabled=True)
     memory_cache: dict[int, tuple[list[AxisAlignedLine], list[AxisAlignedLine]]] = {}
     built_pages = 0
@@ -316,5 +326,7 @@ def build_pdf_line_cache(
 def discover_pdf_files(pdf_dir: str) -> list[str]:
     root = Path(pdf_dir)
     if not root.exists():
-        return []
+        raise FileNotFoundError(f"未找到 PDF 目录: {root.resolve()}")
+    if not root.is_dir():
+        raise NotADirectoryError(f"PDF 路径不是目录: {root.resolve()}")
     return sorted(str(path) for path in root.rglob("*.pdf"))

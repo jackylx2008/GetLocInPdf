@@ -26,7 +26,7 @@ def main() -> None:
     config = load_config()
     pdf_dir = config["pdf"].get("path") or os.environ.get("PDF_PATH")
     if not pdf_dir:
-        logging.error("未配置 PDF_PATH 或 config.yaml 中的 pdf.path。")
+        logging.error("未配置 PDF 目录，请在环境变量 PDF_PATH 或 config.yaml 的 pdf.path 中提供目录路径。")
         return
 
     cache_dir = config["pdf"].get("region_line_cache_dir", "cache/line_boxes")
@@ -35,7 +35,7 @@ def main() -> None:
 
     pdf_files = discover_pdf_files(pdf_dir)
     if not pdf_files:
-        logging.warning("在目录中未找到 PDF 文件: %s", pdf_dir)
+        logging.warning("PDF 目录中未找到可处理的 .pdf 文件: %s", pdf_dir)
         return
 
     logging.info("开始构建矢量线缓存，PDF 目录: %s", pdf_dir)
