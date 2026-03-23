@@ -18,6 +18,7 @@ class AxisAlignedLine:
     axis_value: float
     span_start: float
     span_end: float
+    layer: str | None = None
 
     @property
     def length(self) -> float:
@@ -30,7 +31,7 @@ class AxisAlignedLine:
 class LineCacheStore:
     """缓存页面矢量线提取结果，避免重复调用 get_cdrawings()."""
 
-    CACHE_VERSION = "v1"
+    CACHE_VERSION = "v2"
 
     def __init__(self, cache_dir: str | None, enabled: bool = True) -> None:
         self.cache_dir = cache_dir
@@ -94,6 +95,7 @@ class LineCacheStore:
                     "axis_value": line.axis_value,
                     "span_start": line.span_start,
                     "span_end": line.span_end,
+                    "layer": line.layer,
                 }
                 for line in vertical_lines
             ],
@@ -103,6 +105,7 @@ class LineCacheStore:
                     "axis_value": line.axis_value,
                     "span_start": line.span_start,
                     "span_end": line.span_end,
+                    "layer": line.layer,
                 }
                 for line in horizontal_lines
             ],
@@ -162,7 +165,9 @@ def collect_page_axis_lines(
     vertical_lines: dict[tuple[str, float, float, float], AxisAlignedLine] = {}
     horizontal_lines: dict[tuple[str, float, float, float], AxisAlignedLine] = {}
 
-    for drawing in page.get_cdrawings():
+    for drawing in page.get_drawings():
+        layer = drawing.get("layer")
+        normalized_layer = str(layer) if layer is not None else None
         for item in drawing.get("items", []):
             if item[0] != "l":
                 continue
@@ -181,8 +186,11 @@ def collect_page_axis_lines(
                     axis_value=axis_value,
                     span_start=span_start,
                     span_end=span_end,
+                    layer=normalized_layer,
                 )
-                vertical_lines[("vertical", axis_value, span_start, span_end)] = line
+                vertical_lines[
+                    ("vertical", axis_value, span_start, span_end, normalized_layer)
+                ] = line
             elif delta_y <= axis_tolerance and delta_x >= min_length:
                 axis_value = round((start.y + end.y) / 2, 2)
                 span_start = round(min(start.x, end.x), 2)
@@ -192,8 +200,11 @@ def collect_page_axis_lines(
                     axis_value=axis_value,
                     span_start=span_start,
                     span_end=span_end,
+                    layer=normalized_layer,
                 )
-                horizontal_lines[("horizontal", axis_value, span_start, span_end)] = line
+                horizontal_lines[
+                    ("horizontal", axis_value, span_start, span_end, normalized_layer)
+                ] = line
 
     return list(vertical_lines.values()), list(horizontal_lines.values())
 

@@ -469,11 +469,29 @@ class NearestLineBoxDetector:
         center_x = (keyword_rect.x0 + keyword_rect.x1) / 2
         center_y = (keyword_rect.y0 + keyword_rect.y1) / 2
         vertical_lines, horizontal_lines = self._collect_lines(page)
+        boundary_vertical_lines, boundary_horizontal_lines = self._prepare_boundary_lines(
+            vertical_lines,
+            horizontal_lines,
+        )
+        room_rect = self._detect_smallest_enclosing_room(
+            boundary_vertical_lines,
+            boundary_horizontal_lines,
+            keyword_rect,
+        )
+        if room_rect is not None:
+            return self._refine_room_rect(
+                room_rect,
+                boundary_vertical_lines,
+                boundary_horizontal_lines,
+                keyword_rect,
+            )
+
+        # 回退到旧的“就近边框”策略，尽量保持原有兼容性。
         projection_tolerance = max(1.0, float(self.config.axis_tolerance) * 2)
         primary_min_length = float(self.config.min_length)
 
         left = self._pick_vertical_boundary(
-            vertical_lines,
+            boundary_vertical_lines or vertical_lines,
             center_x,
             center_y,
             direction="left",
@@ -481,7 +499,7 @@ class NearestLineBoxDetector:
             min_length=primary_min_length,
         )
         right = self._pick_vertical_boundary(
-            vertical_lines,
+            boundary_vertical_lines or vertical_lines,
             center_x,
             center_y,
             direction="right",
@@ -493,13 +511,13 @@ class NearestLineBoxDetector:
             return None
 
         top = self._pick_horizontal_closing_boundary(
-            horizontal_lines,
+            boundary_horizontal_lines or horizontal_lines,
             left,
             right,
             center_y,
             direction="up",
         ) or self._pick_horizontal_boundary(
-            horizontal_lines,
+            boundary_horizontal_lines or horizontal_lines,
             center_x,
             center_y,
             direction="up",
@@ -507,13 +525,13 @@ class NearestLineBoxDetector:
             min_length=primary_min_length,
         )
         bottom = self._pick_horizontal_closing_boundary(
-            horizontal_lines,
+            boundary_horizontal_lines or horizontal_lines,
             left,
             right,
             center_y,
             direction="down",
         ) or self._pick_horizontal_boundary(
-            horizontal_lines,
+            boundary_horizontal_lines or horizontal_lines,
             center_x,
             center_y,
             direction="down",
@@ -534,6 +552,402 @@ class NearestLineBoxDetector:
         )
         border_rect.normalize()
         return border_rect
+
+    def _prepare_boundary_lines(
+        self,
+        vertical_lines: Sequence[AxisAlignedLine],
+        horizontal_lines: Sequence[AxisAlignedLine],
+    ) -> tuple[list[AxisAlignedLine], list[AxisAlignedLine]]:
+        filtered_vertical = self._filter_room_boundary_lines(vertical_lines)
+        filtered_horizontal = self._filter_room_boundary_lines(horizontal_lines)
+        return (
+            self._merge_axis_lines(filtered_vertical),
+            self._merge_axis_lines(filtered_horizontal),
+        )
+
+    def _filter_room_boundary_lines(
+        self,
+        lines: Sequence[AxisAlignedLine],
+    ) -> list[AxisAlignedLine]:
+        filtered_lines = [
+            line for line in lines if self._is_room_boundary_layer(line.layer)
+        ]
+        return filtered_lines if filtered_lines else list(lines)
+
+    def _is_room_boundary_layer(self, layer: str | None) -> bool:
+        if not layer:
+            return False
+
+        layer_upper = layer.upper()
+        if layer_upper == "A-WALL":
+            return True
+        return "00-WALL" in layer_upper
+
+    def _merge_axis_lines(
+        self,
+        lines: Sequence[AxisAlignedLine],
+    ) -> list[AxisAlignedLine]:
+        if not lines:
+            return []
+
+        axis_merge_tolerance = max(0.5, float(self.config.axis_tolerance) * 2)
+        span_gap_tolerance = max(3.0, float(self.config.axis_tolerance) * 10)
+        sorted_lines = sorted(
+            lines,
+            key=lambda line: (
+                line.orientation,
+                line.layer or "",
+                round(line.axis_value / axis_merge_tolerance),
+                line.span_start,
+                line.span_end,
+            ),
+        )
+        merged_lines: list[AxisAlignedLine] = []
+
+        for line in sorted_lines:
+            if not merged_lines:
+                merged_lines.append(line)
+                continue
+
+            previous = merged_lines[-1]
+            same_group = (
+                previous.orientation == line.orientation
+                and (previous.layer or "") == (line.layer or "")
+                and abs(previous.axis_value - line.axis_value) <= axis_merge_tolerance
+                and line.span_start <= (previous.span_end + span_gap_tolerance)
+            )
+            if not same_group:
+                merged_lines.append(line)
+                continue
+
+            merged_lines[-1] = AxisAlignedLine(
+                orientation=previous.orientation,
+                axis_value=round((previous.axis_value + line.axis_value) / 2, 2),
+                span_start=min(previous.span_start, line.span_start),
+                span_end=max(previous.span_end, line.span_end),
+                layer=previous.layer or line.layer,
+            )
+
+        return merged_lines
+
+    def _detect_smallest_enclosing_room(
+        self,
+        vertical_lines: Sequence[AxisAlignedLine],
+        horizontal_lines: Sequence[AxisAlignedLine],
+        keyword_rect: fitz.Rect,
+    ) -> fitz.Rect | None:
+        if not vertical_lines or not horizontal_lines:
+            return None
+
+        center_x = (keyword_rect.x0 + keyword_rect.x1) / 2
+        center_y = (keyword_rect.y0 + keyword_rect.y1) / 2
+        projection_tolerance = max(1.0, float(self.config.axis_tolerance) * 2)
+        search_margin = float(self.config.search_margin)
+        min_room_width = max(
+            keyword_rect.width + projection_tolerance * 2,
+            12.0,
+        )
+        min_room_height = max(
+            keyword_rect.height + projection_tolerance * 6,
+            12.0,
+        )
+        min_clearance = max(2.0, projection_tolerance)
+
+        left_candidates = [
+            line
+            for line in vertical_lines
+            if line.axis_value < center_x
+            and line.covers(center_y, projection_tolerance)
+            and (center_x - line.axis_value) <= search_margin
+        ]
+        right_candidates = [
+            line
+            for line in vertical_lines
+            if line.axis_value > center_x
+            and line.covers(center_y, projection_tolerance)
+            and (line.axis_value - center_x) <= search_margin
+        ]
+        left_candidates = sorted(left_candidates, key=lambda line: center_x - line.axis_value)[:16]
+        right_candidates = sorted(right_candidates, key=lambda line: line.axis_value - center_x)[:16]
+
+        candidates: list[tuple[float, float, float, fitz.Rect]] = []
+        for left in left_candidates:
+            for right in right_candidates:
+                if left.axis_value >= right.axis_value:
+                    continue
+
+                width = right.axis_value - left.axis_value
+                if width < min_room_width:
+                    continue
+
+                top_candidates = self._find_closing_boundaries(
+                    horizontal_lines,
+                    left.axis_value,
+                    right.axis_value,
+                    center_y,
+                    direction="up",
+                )[:12]
+                bottom_candidates = self._find_closing_boundaries(
+                    horizontal_lines,
+                    left.axis_value,
+                    right.axis_value,
+                    center_y,
+                    direction="down",
+                )[:12]
+
+                for top in top_candidates:
+                    for bottom in bottom_candidates:
+                        if top.axis_value >= bottom.axis_value:
+                            continue
+
+                        height = bottom.axis_value - top.axis_value
+                        if height < min_room_height:
+                            continue
+
+                        border_rect = fitz.Rect(
+                            left.axis_value,
+                            top.axis_value,
+                            right.axis_value,
+                            bottom.axis_value,
+                        )
+                        border_rect.normalize()
+                        if not self._rect_contains_point(
+                            border_rect,
+                            center_x,
+                            center_y,
+                            tolerance=projection_tolerance,
+                        ):
+                            continue
+
+                        clearances = (
+                            center_x - border_rect.x0,
+                            border_rect.x1 - center_x,
+                            center_y - border_rect.y0,
+                            border_rect.y1 - center_y,
+                        )
+                        if min(clearances) < min_clearance:
+                            continue
+
+                        area = border_rect.width * border_rect.height
+                        perimeter = border_rect.width + border_rect.height
+                        distance_penalty = (
+                            (center_x - left.axis_value)
+                            + (right.axis_value - center_x)
+                            + (center_y - top.axis_value)
+                            + (bottom.axis_value - center_y)
+                        )
+                        candidates.append(
+                            (
+                                area,
+                                perimeter,
+                                distance_penalty,
+                                border_rect,
+                            )
+                        )
+
+        if not candidates:
+            return None
+        return min(candidates)[3]
+
+    def _refine_room_rect(
+        self,
+        border_rect: fitz.Rect,
+        vertical_lines: Sequence[AxisAlignedLine],
+        horizontal_lines: Sequence[AxisAlignedLine],
+        keyword_rect: fitz.Rect,
+    ) -> fitz.Rect:
+        center_x = (keyword_rect.x0 + keyword_rect.x1) / 2
+        center_y = (keyword_rect.y0 + keyword_rect.y1) / 2
+        projection_tolerance = max(1.0, float(self.config.axis_tolerance) * 2)
+        distance_band = max(1.0, float(self.config.axis_tolerance) * 2)
+
+        left = self._pick_inward_vertical_boundary(
+            vertical_lines,
+            center_x,
+            center_y,
+            border_rect,
+            direction="left",
+            projection_tolerance=projection_tolerance,
+            distance_band=distance_band,
+        )
+        right = self._pick_inward_vertical_boundary(
+            vertical_lines,
+            center_x,
+            center_y,
+            border_rect,
+            direction="right",
+            projection_tolerance=projection_tolerance,
+            distance_band=distance_band,
+        )
+        top = self._pick_inward_horizontal_boundary(
+            horizontal_lines,
+            center_x,
+            center_y,
+            border_rect,
+            direction="up",
+            projection_tolerance=projection_tolerance,
+            distance_band=distance_band,
+        )
+        bottom = self._pick_inward_horizontal_boundary(
+            horizontal_lines,
+            center_x,
+            center_y,
+            border_rect,
+            direction="down",
+            projection_tolerance=projection_tolerance,
+            distance_band=distance_band,
+        )
+
+        refined = fitz.Rect(
+            left.axis_value if left is not None else border_rect.x0,
+            top.axis_value if top is not None else border_rect.y0,
+            right.axis_value if right is not None else border_rect.x1,
+            bottom.axis_value if bottom is not None else border_rect.y1,
+        )
+        refined.normalize()
+        if (
+            refined.x0 >= refined.x1
+            or refined.y0 >= refined.y1
+            or not self._rect_contains_point(
+                refined,
+                center_x,
+                center_y,
+                tolerance=projection_tolerance,
+            )
+        ):
+            return border_rect
+        return refined
+
+    def _pick_inward_vertical_boundary(
+        self,
+        lines: Sequence[AxisAlignedLine],
+        center_x: float,
+        center_y: float,
+        border_rect: fitz.Rect,
+        direction: str,
+        projection_tolerance: float,
+        distance_band: float,
+    ) -> AxisAlignedLine | None:
+        candidates: list[tuple[float, float, float, AxisAlignedLine]] = []
+
+        for line in lines:
+            if not line.covers(center_y, projection_tolerance):
+                continue
+            if direction == "left":
+                if line.axis_value < border_rect.x0 or line.axis_value >= center_x:
+                    continue
+                distance = center_x - line.axis_value
+                axis_rank = -line.axis_value
+            else:
+                if line.axis_value > border_rect.x1 or line.axis_value <= center_x:
+                    continue
+                distance = line.axis_value - center_x
+                axis_rank = line.axis_value
+
+            candidates.append((distance, -line.length, axis_rank, line))
+
+        if not candidates:
+            return None
+
+        nearest_distance = min(candidate[0] for candidate in candidates)
+        shortlisted = [
+            candidate
+            for candidate in candidates
+            if candidate[0] <= (nearest_distance + distance_band)
+        ]
+        return min(shortlisted, key=lambda candidate: (candidate[1], candidate[0], candidate[2]))[3]
+
+    def _pick_inward_horizontal_boundary(
+        self,
+        lines: Sequence[AxisAlignedLine],
+        center_x: float,
+        center_y: float,
+        border_rect: fitz.Rect,
+        direction: str,
+        projection_tolerance: float,
+        distance_band: float,
+    ) -> AxisAlignedLine | None:
+        candidates: list[tuple[float, float, float, AxisAlignedLine]] = []
+
+        for line in lines:
+            if not line.covers(center_x, projection_tolerance):
+                continue
+            if direction == "up":
+                if line.axis_value < border_rect.y0 or line.axis_value >= center_y:
+                    continue
+                distance = center_y - line.axis_value
+                axis_rank = -line.axis_value
+            else:
+                if line.axis_value > border_rect.y1 or line.axis_value <= center_y:
+                    continue
+                distance = line.axis_value - center_y
+                axis_rank = line.axis_value
+
+            candidates.append((distance, -line.length, axis_rank, line))
+
+        if not candidates:
+            return None
+
+        nearest_distance = min(candidate[0] for candidate in candidates)
+        shortlisted = [
+            candidate
+            for candidate in candidates
+            if candidate[0] <= (nearest_distance + distance_band)
+        ]
+        return min(shortlisted, key=lambda candidate: (candidate[1], candidate[0], candidate[2]))[3]
+
+    def _find_closing_boundaries(
+        self,
+        lines: Sequence[AxisAlignedLine],
+        interval_start: float,
+        interval_end: float,
+        center_y: float,
+        direction: str,
+    ) -> list[AxisAlignedLine]:
+        endpoint_tolerance = max(3.0, float(self.config.axis_tolerance) * 10)
+        candidates: list[tuple[float, float, float, AxisAlignedLine]] = []
+
+        for line in lines:
+            if direction == "up":
+                distance = center_y - line.axis_value
+            else:
+                distance = line.axis_value - center_y
+
+            if distance <= 0 or distance > float(self.config.search_margin):
+                continue
+
+            left_gap = self._line_edge_gap(line, interval_start)
+            right_gap = self._line_edge_gap(line, interval_end)
+            overlap = min(line.span_end, interval_end) - max(line.span_start, interval_start)
+            if overlap <= 0:
+                continue
+            if left_gap > endpoint_tolerance or right_gap > endpoint_tolerance:
+                continue
+
+            candidates.append(
+                (
+                    distance,
+                    left_gap + right_gap,
+                    -overlap,
+                    line,
+                )
+            )
+
+        return [candidate[3] for candidate in sorted(candidates)]
+
+    @staticmethod
+    def _rect_contains_point(
+        outer_rect: fitz.Rect,
+        point_x: float,
+        point_y: float,
+        tolerance: float = 0.0,
+    ) -> bool:
+        return (
+            outer_rect.x0 <= (point_x + tolerance)
+            and outer_rect.y0 <= (point_y + tolerance)
+            and outer_rect.x1 >= (point_x - tolerance)
+            and outer_rect.y1 >= (point_y - tolerance)
+        )
 
     def _collect_lines(
         self,
