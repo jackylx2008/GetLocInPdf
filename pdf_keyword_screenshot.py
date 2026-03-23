@@ -1,6 +1,9 @@
 import logging
 import os
 import shutil
+import json
+import hashlib
+import time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from typing import Any, Mapping, Sequence
@@ -55,6 +58,8 @@ class LineBoxDetectionConfig:
     min_length: float = 20.0
     axis_tolerance: float = 0.5
     search_margin: float = 200.0
+    cache_enabled: bool = True
+    cache_dir: str = "cache/line_boxes"
 
 
 @dataclass(frozen=True)
@@ -72,6 +77,123 @@ class AxisAlignedLine:
 
     def covers(self, value: float, tolerance: float = 0.0) -> bool:
         return (self.span_start - tolerance) <= value <= (self.span_end + tolerance)
+
+
+class LineCacheStore:
+    """缓存页面矢量线提取结果，避免重复调用 get_cdrawings()."""
+
+    CACHE_VERSION = "v1"
+
+    def __init__(self, cache_dir: str | None, enabled: bool = True) -> None:
+        self.cache_dir = cache_dir
+        self.enabled = enabled and bool(cache_dir)
+
+    def load(
+        self,
+        pdf_path: str | None,
+        page_number: int,
+        axis_tolerance: float,
+        min_length: float,
+    ) -> tuple[list[AxisAlignedLine], list[AxisAlignedLine]] | None:
+        cache_path = self._cache_path(
+            pdf_path,
+            page_number,
+            axis_tolerance,
+            min_length,
+        )
+        if not cache_path or not os.path.exists(cache_path):
+            return None
+
+        try:
+            with open(cache_path, "r", encoding="utf-8") as file:
+                payload = json.load(file)
+        except (OSError, ValueError, TypeError):
+            return None
+
+        vertical_lines = [
+            AxisAlignedLine(**line_payload)
+            for line_payload in payload.get("vertical_lines", [])
+        ]
+        horizontal_lines = [
+            AxisAlignedLine(**line_payload)
+            for line_payload in payload.get("horizontal_lines", [])
+        ]
+        return vertical_lines, horizontal_lines
+
+    def save(
+        self,
+        pdf_path: str | None,
+        page_number: int,
+        axis_tolerance: float,
+        min_length: float,
+        vertical_lines: Sequence[AxisAlignedLine],
+        horizontal_lines: Sequence[AxisAlignedLine],
+    ) -> None:
+        cache_path = self._cache_path(
+            pdf_path,
+            page_number,
+            axis_tolerance,
+            min_length,
+        )
+        if not cache_path:
+            return
+
+        os.makedirs(os.path.dirname(cache_path), exist_ok=True)
+        payload = {
+            "vertical_lines": [
+                {
+                    "orientation": line.orientation,
+                    "axis_value": line.axis_value,
+                    "span_start": line.span_start,
+                    "span_end": line.span_end,
+                }
+                for line in vertical_lines
+            ],
+            "horizontal_lines": [
+                {
+                    "orientation": line.orientation,
+                    "axis_value": line.axis_value,
+                    "span_start": line.span_start,
+                    "span_end": line.span_end,
+                }
+                for line in horizontal_lines
+            ],
+        }
+
+        try:
+            with open(cache_path, "w", encoding="utf-8") as file:
+                json.dump(payload, file, ensure_ascii=True)
+        except OSError:
+            logging.debug("矢量线缓存写入失败: %s", cache_path, exc_info=True)
+
+    def _cache_path(
+        self,
+        pdf_path: str | None,
+        page_number: int,
+        axis_tolerance: float,
+        min_length: float,
+    ) -> str | None:
+        if not self.enabled or not pdf_path:
+            return None
+
+        try:
+            stat = os.stat(pdf_path)
+        except OSError:
+            return None
+
+        key = "|".join(
+            (
+                self.CACHE_VERSION,
+                os.path.abspath(pdf_path),
+                str(stat.st_mtime_ns),
+                str(stat.st_size),
+                str(page_number),
+                f"{axis_tolerance:.4f}",
+                f"{min_length:.4f}",
+            )
+        )
+        digest = hashlib.sha256(key.encode("utf-8")).hexdigest()
+        return os.path.join(self.cache_dir or "", f"{digest}.json")
 
 
 class ConfigLoader:
@@ -244,9 +366,20 @@ class PdfPageRenderer:
 class NearestLineBoxDetector:
     """根据关键词中心向四个方向检索最近的水平 / 垂直边线。"""
 
-    def __init__(self, config: LineBoxDetectionConfig | None = None) -> None:
+    def __init__(
+        self,
+        config: LineBoxDetectionConfig | None = None,
+        pdf_path: str | None = None,
+    ) -> None:
         self.config = config or LineBoxDetectionConfig()
-        self._page_line_cache: dict[int, tuple[list[AxisAlignedLine], list[AxisAlignedLine]]] = {}
+        self.pdf_path = os.path.abspath(pdf_path) if pdf_path else None
+        self.line_cache_store = LineCacheStore(
+            cache_dir=self.config.cache_dir,
+            enabled=self.config.cache_enabled,
+        )
+        self._page_line_cache: dict[
+            int, tuple[list[AxisAlignedLine], list[AxisAlignedLine]]
+        ] = {}
 
     def detect(self, page: fitz.Page, keyword_rect: fitz.Rect) -> fitz.Rect | None:
         if self.config.mode != "nearest_line_box":
@@ -332,8 +465,25 @@ class NearestLineBoxDetector:
 
         axis_tolerance = float(self.config.axis_tolerance)
         min_length = min(5.0, float(self.config.min_length))
+        disk_cached = self.line_cache_store.load(
+            self.pdf_path,
+            page_number,
+            axis_tolerance,
+            min_length,
+        )
+        if disk_cached is not None:
+            self._page_line_cache[page_number] = disk_cached
+            logging.info(
+                "第 %s 页矢量线已从缓存加载: 垂直=%s, 水平=%s",
+                page_number + 1,
+                len(disk_cached[0]),
+                len(disk_cached[1]),
+            )
+            return disk_cached
+
         vertical_lines: dict[tuple[str, float, float, float], AxisAlignedLine] = {}
         horizontal_lines: dict[tuple[str, float, float, float], AxisAlignedLine] = {}
+        started_at = time.perf_counter()
 
         for drawing in page.get_cdrawings():
             for item in drawing.get("items", []):
@@ -373,7 +523,23 @@ class NearestLineBoxDetector:
                     ] = line
 
         cached_lines = (list(vertical_lines.values()), list(horizontal_lines.values()))
+        self.line_cache_store.save(
+            self.pdf_path,
+            page_number,
+            axis_tolerance,
+            min_length,
+            cached_lines[0],
+            cached_lines[1],
+        )
         self._page_line_cache[page_number] = cached_lines
+        elapsed = time.perf_counter() - started_at
+        logging.info(
+            "第 %s 页矢量线提取完成: 垂直=%s, 水平=%s, 耗时=%.2fs",
+            page_number + 1,
+            len(cached_lines[0]),
+            len(cached_lines[1]),
+            elapsed,
+        )
         return cached_lines
 
     def _pick_vertical_boundary(
@@ -710,7 +876,10 @@ class RegionScreenshotJob(KeywordScreenshotJob):
         )
         self.region_rect = region_rect
         self.border_rect = border_rect
-        self.line_box_detector = NearestLineBoxDetector(line_box_detection)
+        self.line_box_detector = NearestLineBoxDetector(
+            line_box_detection,
+            pdf_path=pdf_path,
+        )
 
     def default_border_style(self) -> BorderStyle:
         return BorderStyle(fill=True)

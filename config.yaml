@@ -5,7 +5,7 @@ log_level: ${LOG_LEVEL}  # 日志级别: DEBUG, INFO, WARNING, ERROR, CRITICAL
 pdf:
   path: ${PDF_PATH}  # PDF 目录路径
   file: ${PDF_FILE}  # PDF 文件全路径
-  keywords: ["C.L1M1.M091"]  # 增加更多关键字测试
+  keywords: ["C.L1M1.M088"]  # 增加更多关键字测试
   poppler_path: ${POPPLER_PATH} 
   # 配置全图截图绝对坐标 (x1, y1, x2, y2)
   full_page_rect:
@@ -42,6 +42,9 @@ pdf:
   region_line_min_length: 20.0
   region_line_axis_tolerance: 0.5
   region_line_search_margin: 200.0
+  # 是否缓存每页提取到的矢量线，避免重复扫描复杂 PDF
+  region_line_cache_enabled: true
+  region_line_cache_dir: cache/line_boxes
   region_border_width: ${REGION_BORDER_WIDTH}
   region_border_opacity: ${REGION_BORDER_OPACITY}
   region_dpi: ${REGION_DPI}

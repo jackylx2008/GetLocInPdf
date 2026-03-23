@@ -31,6 +31,8 @@ def main():
         min_length=config["pdf"].get("region_line_min_length", 20.0),
         axis_tolerance=config["pdf"].get("region_line_axis_tolerance", 0.5),
         search_margin=config["pdf"].get("region_line_search_margin", 200.0),
+        cache_enabled=config["pdf"].get("region_line_cache_enabled", True),
+        cache_dir=config["pdf"].get("region_line_cache_dir", "cache/line_boxes"),
     )
     dpi = config["pdf"].get("region_dpi", 300)
 
@@ -50,6 +52,7 @@ def main():
     logging.info(f"区域截图边框颜色: {border_style.color}")
     logging.info(f"区域截图边框透明度: {border_style.opacity}")
     logging.info(f"区域截图边框模式: {line_box_detection.mode}")
+    logging.info(f"区域截图矢量线缓存: {line_box_detection.cache_enabled}")
 
     capture_region_screenshots(
         pdf_file,

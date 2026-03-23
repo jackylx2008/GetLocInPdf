@@ -35,6 +35,7 @@
 - `pdf.full_page_keyword_border` / `pdf.region_keyword_border`：关键字边框相对于中心点的偏移范围。
 - `pdf.region_border_mode`：区域截图边框模式，支持 `nearest_line_box` 和 `fixed`。
 - `pdf.region_line_min_length` / `pdf.region_line_axis_tolerance` / `pdf.region_line_search_margin`：区域截图自动检索矢量边框时的线段过滤与搜索参数。
+- `pdf.region_line_cache_enabled` / `pdf.region_line_cache_dir`：缓存每页提取到的矢量线，默认目录为 `cache/line_boxes`，适合反复调参或重复处理同一份复杂 PDF。
 - `pdf.full_page_dpi` / `pdf.region_dpi`：两种截图模式的 DPI。全图通常用 `100-300`，区域通常用 `1000-1200`。
 - `pdf.*_border_width`：边框线宽，会按 DPI 自动缩放。
 - `pdf.*_border_opacity`：边框透明度，范围 `0.0-1.0`。
@@ -72,6 +73,12 @@ GetLocInPdf/
 - `pdf.region_rect`: 局部区域截图相对于关键字中心点的偏移量。
 - `pdf.region_keyword_border`: 关键字红框相对于中心点的偏移量。
 - `pdf.region_border_mode`: 区域截图红框模式，默认优先按关键词中心向四个方向检索最近的水平 / 垂直矢量线。
+- `pdf.region_line_cache_enabled`: 是否启用页面矢量线缓存。复杂图纸类 PDF 建议保持开启。
+
+如果 `nearest_line_box` 很慢，通常瓶颈在 `PyMuPDF` 的 `get_cdrawings()` 提取页面矢量元素，而不是简单的命中几何筛选。此时更推荐：
+
+- 保持 `pdf.region_line_cache_enabled: true`，首次提取后复用缓存。
+- 如果只需要固定红框，改用 `pdf.region_border_mode: fixed`，可直接跳过矢量线扫描。
 
 ## 使用方法
 
