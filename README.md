@@ -41,8 +41,10 @@
 - `pdf.region_line_min_length` / `pdf.region_line_axis_tolerance` / `pdf.region_line_search_margin`：区域截图自动检索矢量边框时的线段过滤与搜索参数。
 - `pdf.region_line_cache_enabled` / `pdf.region_line_cache_dir`：缓存每页提取到的矢量线，默认目录为 `cache/line_boxes`，适合反复调参或重复处理同一份复杂 PDF。
 - `pdf.region_border_outline_color` / `pdf.region_border_outline_opacity`：区域截图红框边框颜色与透明度。
+- `pdf.region_border_offset`：区域截图红框整体向外扩展的偏移量。
 - `pdf.region_border_fill_color` / `pdf.region_border_fill_opacity`：区域截图红框填充颜色与透明度。
 - `pdf.region_arrow_color` / `pdf.region_arrow_opacity` / `pdf.region_arrow_corner_gap`：区域截图箭头颜色、透明度，以及箭头尖端到红框角点的间距。
+- `pdf.region_arrow_size` / `pdf.region_arrow_tail_length`：控制箭头头部大小和箭头尾部直线长度。
 - `pdf.full_page_dpi` / `pdf.region_dpi`：两种截图模式的 DPI。全图通常用 `100-300`，区域通常用 `1000-1200`。
 - `pdf.*_border_width`：边框线宽，会按 DPI 自动缩放。
 - `pdf.*_border_opacity`：边框透明度，范围 `0.0-1.0`。
@@ -83,9 +85,11 @@ GetLocInPdf/
 - `pdf.region_keyword_border`: 关键字红框相对于中心点的偏移量。
 - `pdf.region_border_mode`: 区域截图红框模式，默认优先按关键词中心向四个方向检索最近的水平 / 垂直矢量线。
 - `pdf.region_line_cache_enabled`: 是否启用页面矢量线缓存。复杂图纸类 PDF 建议保持开启。
+- `pdf.region_border_offset`: 在命中到的区域红框基础上，统一向外扩展指定距离。
 - `pdf.region_border_outline_color` / `pdf.region_border_fill_color`: 分别控制区域截图红框边框和填充颜色。
 - `pdf.region_border_outline_opacity` / `pdf.region_border_fill_opacity`: 分别控制区域截图红框边框和填充透明度。
 - `pdf.region_arrow_color` / `pdf.region_arrow_opacity` / `pdf.region_arrow_corner_gap`: 控制箭头颜色、透明度和角点间距。
+- `pdf.region_arrow_size` / `pdf.region_arrow_tail_length`: 控制箭头头部大小和尾部直线长度。
 
 如果 `nearest_line_box` 很慢，通常瓶颈在 `PyMuPDF` 的 `get_cdrawings()` 提取页面矢量元素，而不是简单的命中几何筛选。此时更推荐：
 

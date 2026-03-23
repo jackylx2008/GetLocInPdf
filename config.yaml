@@ -19,7 +19,25 @@ pdf:
     y1: ${FULL_PAGE_BORDER_Y1}
     x2: ${FULL_PAGE_BORDER_X2}
     y2: ${FULL_PAGE_BORDER_Y2}
+  # 全图截图红框模式:
+  # nearest_line_box: 以关键字中心向上下左右检索最近的水平 / 垂直矢量线并自动组成红框
+  # fixed: 回退到 full_page_keyword_border 配置的固定偏移红框
+  full_page_border_mode: ${FULL_PAGE_BORDER_MODE}
+  # 全图截图自动检索矢量边框时的线段筛选与搜索参数
+  full_page_line_min_length: ${FULL_PAGE_LINE_MIN_LENGTH}
+  full_page_line_axis_tolerance: ${FULL_PAGE_LINE_AXIS_TOLERANCE}
+  full_page_line_search_margin: ${FULL_PAGE_LINE_SEARCH_MARGIN}
+  full_page_line_cache_enabled: ${FULL_PAGE_LINE_CACHE_ENABLED}
+  full_page_line_cache_dir: "${FULL_PAGE_LINE_CACHE_DIR}"
   full_page_border_width: ${FULL_PAGE_BORDER_WIDTH}
+  full_page_border_offset: ${FULL_PAGE_BORDER_OFFSET}
+  full_page_border_color: "${FULL_PAGE_BORDER_COLOR}"
+  full_page_border_opacity: ${FULL_PAGE_BORDER_OPACITY}
+  full_page_arrow_color: "${FULL_PAGE_ARROW_COLOR}"
+  full_page_arrow_opacity: ${FULL_PAGE_ARROW_OPACITY}
+  full_page_arrow_corner_gap: ${FULL_PAGE_ARROW_CORNER_GAP}
+  full_page_arrow_size: ${FULL_PAGE_ARROW_SIZE}
+  full_page_arrow_tail_length: ${FULL_PAGE_ARROW_TAIL_LENGTH}
   full_page_dpi: ${DPI}
 
   # 区域截图范围 (基于关键字中心的偏移量)
@@ -46,6 +64,7 @@ pdf:
   region_line_cache_enabled: true
   region_line_cache_dir: cache/line_boxes
   region_border_width: ${REGION_BORDER_WIDTH}
+  region_border_offset: ${REGION_BORDER_OFFSET}
   region_border_opacity: ${REGION_BORDER_OPACITY}
   region_border_outline_color: "${REGION_BORDER_OUTLINE_COLOR}"
   region_border_outline_opacity: ${REGION_BORDER_OUTLINE_OPACITY}
@@ -54,6 +73,8 @@ pdf:
   region_arrow_color: "${REGION_ARROW_COLOR}"
   region_arrow_opacity: ${REGION_ARROW_OPACITY}
   region_arrow_corner_gap: ${REGION_ARROW_CORNER_GAP}
+  region_arrow_size: ${REGION_ARROW_SIZE}
+  region_arrow_tail_length: ${REGION_ARROW_TAIL_LENGTH}
   region_dpi: ${REGION_DPI}
 
 # 统计信息配置

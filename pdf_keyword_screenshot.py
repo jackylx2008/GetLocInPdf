@@ -27,6 +27,7 @@ class BorderStyle:
     width: float = 1.5
     color: ColorConfig = (255, 0, 0)
     opacity: float = 1.0
+    offset: float = 0.0
     fill: bool = False
     outline_color: ColorConfig | None = None
     outline_opacity: float | None = None
@@ -41,6 +42,8 @@ class ArrowStyle:
     color: ColorConfig = (255, 0, 0)
     opacity: float = 1.0
     corner_gap: float = 0.0
+    size: float = 18.0
+    tail_length: float = 36.0
 
 
 @dataclass(frozen=True)
@@ -152,6 +155,19 @@ class RectHelper:
         bounded.normalize()
         return bounded
 
+    @staticmethod
+    def expand(rect: fitz.Rect, offset: float) -> fitz.Rect:
+        expanded = fitz.Rect(rect)
+        if offset == 0:
+            expanded.normalize()
+            return expanded
+        expanded.x0 -= offset
+        expanded.y0 -= offset
+        expanded.x1 += offset
+        expanded.y1 += offset
+        expanded.normalize()
+        return expanded
+
 
 class ColorHelper:
     """颜色转换工具。"""
@@ -248,11 +264,27 @@ class PdfPageRenderer:
         effective_scale_y = (
             image.height / clip_rect.height if clip_rect.height > 0 else self.scale
         )
+        adjusted_border_rect = RectHelper.expand(
+            border_rect,
+            float(border_style.offset),
+        )
+        adjusted_border_rect.intersect(clip_rect)
+        adjusted_border_rect.normalize()
+        if adjusted_border_rect.is_empty or adjusted_border_rect.width <= 0:
+            adjusted_border_rect = fitz.Rect(border_rect)
+            adjusted_border_rect.normalize()
+            adjusted_border_rect.intersect(clip_rect)
+            adjusted_border_rect.normalize()
+        if adjusted_border_rect.is_empty or adjusted_border_rect.height <= 0:
+            adjusted_border_rect = fitz.Rect(border_rect)
+            adjusted_border_rect.normalize()
+            adjusted_border_rect.intersect(clip_rect)
+            adjusted_border_rect.normalize()
         local_rect = fitz.Rect(
-            (border_rect.x0 - clip_rect.x0) * effective_scale_x,
-            (border_rect.y0 - clip_rect.y0) * effective_scale_y,
-            (border_rect.x1 - clip_rect.x0) * effective_scale_x,
-            (border_rect.y1 - clip_rect.y0) * effective_scale_y,
+            (adjusted_border_rect.x0 - clip_rect.x0) * effective_scale_x,
+            (adjusted_border_rect.y0 - clip_rect.y0) * effective_scale_y,
+            (adjusted_border_rect.x1 - clip_rect.x0) * effective_scale_x,
+            (adjusted_border_rect.y1 - clip_rect.y0) * effective_scale_y,
         )
         local_rect.normalize()
 
@@ -273,6 +305,8 @@ class PdfPageRenderer:
                 color=outline_color_cfg,
                 opacity=float(outline_opacity_value),
                 corner_gap=0.0,
+                size=18.0,
+                tail_length=36.0,
             )
             self._draw_corner_arrow(
                 draw,
@@ -284,6 +318,8 @@ class PdfPageRenderer:
                     min(255, int(round(float(effective_arrow_style.opacity) * 255))),
                 ),
                 corner_gap_px=float(effective_arrow_style.corner_gap) * effective_scale,
+                arrow_size_px=float(effective_arrow_style.size) * effective_scale,
+                tail_length_px=float(effective_arrow_style.tail_length) * effective_scale,
             )
         return Image.alpha_composite(image, overlay)
 
@@ -295,11 +331,15 @@ class PdfPageRenderer:
         color: tuple[int, int, int],
         alpha: int,
         corner_gap_px: float,
+        arrow_size_px: float,
+        tail_length_px: float,
     ) -> None:
         arrow_geometry = self._resolve_corner_arrow_geometry(
             image_size,
             target_rect,
             corner_gap_px=corner_gap_px,
+            arrow_size_px=arrow_size_px,
+            tail_length_px=tail_length_px,
         )
         if arrow_geometry is None:
             return
@@ -314,6 +354,8 @@ class PdfPageRenderer:
         image_size: tuple[int, int],
         target_rect: fitz.Rect,
         corner_gap_px: float = 0.0,
+        arrow_size_px: float = 18.0,
+        tail_length_px: float = 36.0,
     ) -> tuple[
         tuple[float, float],
         tuple[float, float],
@@ -325,9 +367,12 @@ class PdfPageRenderer:
         if image_width <= 0 or image_height <= 0:
             return None
 
-        base_length = max(56.0, min(float(min(image_width, image_height)) * 0.18, 220.0))
         margin = max(12.0, min(float(min(image_width, image_height)) * 0.03, 36.0))
         shaft_width = max(4, int(round(min(image_width, image_height) * 0.006)))
+        desired_head_length = max(12.0, float(arrow_size_px))
+        desired_head_width = max(10.0, desired_head_length * 0.75)
+        desired_tail_length = max(12.0, float(tail_length_px))
+        desired_total_length = desired_head_length + desired_tail_length
 
         candidates = [
             ("top_left", (target_rect.x0, target_rect.y0), (-1.0, -1.0)),
@@ -353,14 +398,18 @@ class PdfPageRenderer:
                 image_height=image_height,
                 margin=margin,
             )
-            arrow_length = min(base_length, max_length)
-            min_visible_length = min(40.0, base_length * 0.6)
-            if arrow_length < min_visible_length:
+            min_visible_length = max(20.0, desired_total_length * 0.45)
+            if max_length < min_visible_length:
                 continue
 
+            scale_ratio = min(1.0, max_length / desired_total_length)
+            head_length = desired_head_length * scale_ratio
+            head_width = desired_head_width * scale_ratio
+            tail_length = desired_tail_length * scale_ratio
+            total_length = head_length + tail_length
             tail = (
-                shifted_tip[0] + unit_outward[0] * arrow_length,
-                shifted_tip[1] + unit_outward[1] * arrow_length,
+                shifted_tip[0] + unit_outward[0] * total_length,
+                shifted_tip[1] + unit_outward[1] * total_length,
             )
             line_unit = self._normalize_vector(
                 (shifted_tip[0] - tail[0], shifted_tip[1] - tail[1])
@@ -368,8 +417,6 @@ class PdfPageRenderer:
             if line_unit is None:
                 continue
 
-            head_length = max(18.0, arrow_length * 0.32)
-            head_width = max(14.0, arrow_length * 0.24)
             base_center = (
                 shifted_tip[0] - line_unit[0] * head_length,
                 shifted_tip[1] - line_unit[1] * head_length,
@@ -387,7 +434,7 @@ class PdfPageRenderer:
             if not self._points_inside_image(points, image_width, image_height, margin=1.0):
                 continue
 
-            score = arrow_length
+            score = total_length
             if best_candidate is None or score > best_candidate[0]:
                 best_candidate = (score, points, shaft_width)
 
@@ -1183,6 +1230,9 @@ class FullPageScreenshotJob(KeywordScreenshotJob):
         full_page_rect: RectConfig | None = None,
         border_rect: RectConfig | None = None,
         border_style: BorderStyle | None = None,
+        line_box_detection: LineBoxDetectionConfig | None = None,
+        draw_arrow: bool = True,
+        arrow_style: ArrowStyle | None = None,
         dpi: float = 300,
     ) -> None:
         super().__init__(
@@ -1195,6 +1245,12 @@ class FullPageScreenshotJob(KeywordScreenshotJob):
         )
         self.full_page_rect = full_page_rect
         self.border_rect = border_rect
+        self.draw_arrow = draw_arrow
+        self.arrow_style = arrow_style or ArrowStyle()
+        self.line_box_detector = NearestLineBoxDetector(
+            line_box_detection,
+            pdf_path=pdf_path,
+        )
 
     def default_border_style(self) -> BorderStyle:
         return BorderStyle(fill=False)
@@ -1225,12 +1281,14 @@ class FullPageScreenshotJob(KeywordScreenshotJob):
                 page_img = base_img.copy()
                 for match_index, inst in enumerate(text_instances, start=1):
                     render_inst = RectHelper.to_render_rect(page.fitz_page, inst)
-                    draw_rect = self._resolve_border_rect(render_inst)
+                    draw_rect = self._resolve_border_rect(page, inst, render_inst)
                     page_img = self.renderer.draw_border(
                         page_img,
                         clip_rect,
                         draw_rect,
                         self.border_style,
+                        draw_arrow=self.draw_arrow,
+                        arrow_style=self.arrow_style,
                     )
                     total_matches += 1
                     logging.info(
@@ -1265,11 +1323,39 @@ class FullPageScreenshotJob(KeywordScreenshotJob):
             )
         return results
 
-    def _resolve_border_rect(self, render_inst: fitz.Rect) -> fitz.Rect:
+    def _resolve_border_rect(
+        self,
+        page: PageContext,
+        source_inst: fitz.Rect,
+        render_inst: fitz.Rect,
+    ) -> fitz.Rect:
+        auto_border_rect = self.line_box_detector.detect(page.fitz_page, render_inst)
+        if auto_border_rect is not None:
+            logging.info(
+                "第 %s 页全图截图使用就近矢量线边框: %s",
+                page.page_number,
+                auto_border_rect,
+            )
+            return auto_border_rect
+
         if not self.border_rect:
-            return render_inst
-        center_x, center_y = self._keyword_center(render_inst)
-        return RectHelper.centered(center_x, center_y, self.border_rect)
+            logging.warning(
+                "第 %s 页全图截图未找到就近矢量线边框，已回退到关键字原始框。",
+                page.page_number,
+            )
+            return fitz.Rect(render_inst)
+
+        source_center_x, source_center_y = self._keyword_center(source_inst)
+        source_border_rect = RectHelper.centered(
+            source_center_x,
+            source_center_y,
+            self.border_rect,
+        )
+        logging.warning(
+            "第 %s 页全图截图未找到就近矢量线边框，已回退到配置边框。",
+            page.page_number,
+        )
+        return RectHelper.to_render_rect(page.fitz_page, source_border_rect)
 
 
 class RegionScreenshotJob(KeywordScreenshotJob):
@@ -1441,6 +1527,9 @@ def capture_full_page_screenshots(
     full_page_rect: RectConfig | None = None,
     border_rect: RectConfig | None = None,
     border_style: BorderStyle | None = None,
+    line_box_detection: LineBoxDetectionConfig | None = None,
+    draw_arrow: bool = True,
+    arrow_style: ArrowStyle | None = None,
     dpi: float = 300,
 ) -> list[ScreenshotResult]:
     """兼容旧调用方式的全图截图入口。"""
@@ -1452,6 +1541,9 @@ def capture_full_page_screenshots(
         full_page_rect=full_page_rect,
         border_rect=border_rect,
         border_style=border_style,
+        line_box_detection=line_box_detection,
+        draw_arrow=draw_arrow,
+        arrow_style=arrow_style,
         dpi=dpi,
     ).run()
 

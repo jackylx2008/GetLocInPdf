@@ -46,6 +46,7 @@ def main():
         width=config["pdf"].get("region_border_width", 1.5),
         color=region_border_color,
         opacity=region_border_opacity,
+        offset=config["pdf"].get("region_border_offset", 0.0),
         fill=True,
         outline_color=region_border_outline_color,
         outline_opacity=region_border_outline_opacity,
@@ -56,6 +57,8 @@ def main():
         color=region_arrow_color,
         opacity=config["pdf"].get("region_arrow_opacity", 1.0),
         corner_gap=config["pdf"].get("region_arrow_corner_gap", 0.0),
+        size=config["pdf"].get("region_arrow_size", 18.0),
+        tail_length=config["pdf"].get("region_arrow_tail_length", 36.0),
     )
     line_box_detection = LineBoxDetectionConfig(
         mode=config["pdf"].get("region_border_mode", "nearest_line_box"),
@@ -82,6 +85,7 @@ def main():
     logging.info(f"区域截图 DPI: {dpi}")
     logging.info(f"区域截图边框颜色: {border_style.outline_color}")
     logging.info(f"区域截图边框透明度: {border_style.outline_opacity}")
+    logging.info(f"区域截图边框外扩: {border_style.offset}")
     logging.info(f"区域截图填充颜色: {border_style.fill_color}")
     logging.info(f"区域截图填充透明度: {border_style.fill_opacity}")
     logging.info(f"区域截图边框模式: {line_box_detection.mode}")
@@ -89,6 +93,8 @@ def main():
     logging.info(f"区域截图箭头颜色: {arrow_style.color}")
     logging.info(f"区域截图箭头透明度: {arrow_style.opacity}")
     logging.info(f"区域截图箭头角点间距: {arrow_style.corner_gap}")
+    logging.info(f"区域截图箭头大小: {arrow_style.size}")
+    logging.info(f"区域截图箭头尾部直线长度: {arrow_style.tail_length}")
     logging.info("区域截图箭头: 自动选择可完整显示的角点")
 
     capture_region_screenshots(
