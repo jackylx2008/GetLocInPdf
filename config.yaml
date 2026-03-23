@@ -5,7 +5,7 @@ log_level: ${LOG_LEVEL}  # 日志级别: DEBUG, INFO, WARNING, ERROR, CRITICAL
 pdf:
   path: ${PDF_PATH}  # PDF 目录路径
   file: ${PDF_FILE}  # PDF 文件全路径
-  keywords: ["C.L1M1.M080"]  # 增加更多关键字测试
+  keywords: ${PDF_KEYWORDS}  # 增加更多关键字测试
   poppler_path: ${POPPLER_PATH} 
   # 配置全图截图绝对坐标 (x1, y1, x2, y2)
   full_page_rect:
