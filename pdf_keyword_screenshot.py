@@ -1,9 +1,7 @@
 import logging
+import math
 import os
 import shutil
-import json
-import hashlib
-import time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from typing import Any, Mapping, Sequence
@@ -12,6 +10,7 @@ import fitz  # PyMuPDF，用于文本检索、页面几何信息和坐标处理
 import pypdfium2 as pdfium
 import yaml
 from dotenv import load_dotenv
+from line_box_cache import AxisAlignedLine, LineCacheStore, get_page_axis_lines
 from PIL import Image, ImageDraw
 
 # 加载环境变量
@@ -29,6 +28,19 @@ class BorderStyle:
     color: ColorConfig = (255, 0, 0)
     opacity: float = 1.0
     fill: bool = False
+    outline_color: ColorConfig | None = None
+    outline_opacity: float | None = None
+    fill_color: ColorConfig | None = None
+    fill_opacity: float | None = None
+
+
+@dataclass(frozen=True)
+class ArrowStyle:
+    """区域截图箭头样式。"""
+
+    color: ColorConfig = (255, 0, 0)
+    opacity: float = 1.0
+    corner_gap: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -60,140 +72,6 @@ class LineBoxDetectionConfig:
     search_margin: float = 200.0
     cache_enabled: bool = True
     cache_dir: str = "cache/line_boxes"
-
-
-@dataclass(frozen=True)
-class AxisAlignedLine:
-    """归一化后的水平 / 垂直线段。"""
-
-    orientation: str
-    axis_value: float
-    span_start: float
-    span_end: float
-
-    @property
-    def length(self) -> float:
-        return self.span_end - self.span_start
-
-    def covers(self, value: float, tolerance: float = 0.0) -> bool:
-        return (self.span_start - tolerance) <= value <= (self.span_end + tolerance)
-
-
-class LineCacheStore:
-    """缓存页面矢量线提取结果，避免重复调用 get_cdrawings()."""
-
-    CACHE_VERSION = "v1"
-
-    def __init__(self, cache_dir: str | None, enabled: bool = True) -> None:
-        self.cache_dir = cache_dir
-        self.enabled = enabled and bool(cache_dir)
-
-    def load(
-        self,
-        pdf_path: str | None,
-        page_number: int,
-        axis_tolerance: float,
-        min_length: float,
-    ) -> tuple[list[AxisAlignedLine], list[AxisAlignedLine]] | None:
-        cache_path = self._cache_path(
-            pdf_path,
-            page_number,
-            axis_tolerance,
-            min_length,
-        )
-        if not cache_path or not os.path.exists(cache_path):
-            return None
-
-        try:
-            with open(cache_path, "r", encoding="utf-8") as file:
-                payload = json.load(file)
-        except (OSError, ValueError, TypeError):
-            return None
-
-        vertical_lines = [
-            AxisAlignedLine(**line_payload)
-            for line_payload in payload.get("vertical_lines", [])
-        ]
-        horizontal_lines = [
-            AxisAlignedLine(**line_payload)
-            for line_payload in payload.get("horizontal_lines", [])
-        ]
-        return vertical_lines, horizontal_lines
-
-    def save(
-        self,
-        pdf_path: str | None,
-        page_number: int,
-        axis_tolerance: float,
-        min_length: float,
-        vertical_lines: Sequence[AxisAlignedLine],
-        horizontal_lines: Sequence[AxisAlignedLine],
-    ) -> None:
-        cache_path = self._cache_path(
-            pdf_path,
-            page_number,
-            axis_tolerance,
-            min_length,
-        )
-        if not cache_path:
-            return
-
-        os.makedirs(os.path.dirname(cache_path), exist_ok=True)
-        payload = {
-            "vertical_lines": [
-                {
-                    "orientation": line.orientation,
-                    "axis_value": line.axis_value,
-                    "span_start": line.span_start,
-                    "span_end": line.span_end,
-                }
-                for line in vertical_lines
-            ],
-            "horizontal_lines": [
-                {
-                    "orientation": line.orientation,
-                    "axis_value": line.axis_value,
-                    "span_start": line.span_start,
-                    "span_end": line.span_end,
-                }
-                for line in horizontal_lines
-            ],
-        }
-
-        try:
-            with open(cache_path, "w", encoding="utf-8") as file:
-                json.dump(payload, file, ensure_ascii=True)
-        except OSError:
-            logging.debug("矢量线缓存写入失败: %s", cache_path, exc_info=True)
-
-    def _cache_path(
-        self,
-        pdf_path: str | None,
-        page_number: int,
-        axis_tolerance: float,
-        min_length: float,
-    ) -> str | None:
-        if not self.enabled or not pdf_path:
-            return None
-
-        try:
-            stat = os.stat(pdf_path)
-        except OSError:
-            return None
-
-        key = "|".join(
-            (
-                self.CACHE_VERSION,
-                os.path.abspath(pdf_path),
-                str(stat.st_mtime_ns),
-                str(stat.st_size),
-                str(page_number),
-                f"{axis_tolerance:.4f}",
-                f"{min_length:.4f}",
-            )
-        )
-        digest = hashlib.sha256(key.encode("utf-8")).hexdigest()
-        return os.path.join(self.cache_dir or "", f"{digest}.json")
 
 
 class ConfigLoader:
@@ -331,9 +209,39 @@ class PdfPageRenderer:
         clip_rect: fitz.Rect,
         border_rect: fitz.Rect,
         border_style: BorderStyle,
+        draw_arrow: bool = False,
+        arrow_style: ArrowStyle | None = None,
     ) -> Image.Image:
-        color = ColorHelper.normalize(border_style.color)
-        alpha = max(0, min(255, int(round(float(border_style.opacity) * 255))))
+        outline_color_cfg = (
+            border_style.outline_color
+            if border_style.outline_color is not None
+            else border_style.color
+        )
+        outline_opacity_value = (
+            border_style.outline_opacity
+            if border_style.outline_opacity is not None
+            else border_style.opacity
+        )
+        fill_color_cfg = (
+            border_style.fill_color
+            if border_style.fill_color is not None
+            else outline_color_cfg
+        )
+        fill_opacity_value = (
+            border_style.fill_opacity
+            if border_style.fill_opacity is not None
+            else outline_opacity_value
+        )
+        outline_color = ColorHelper.normalize(outline_color_cfg)
+        outline_alpha = max(
+            0,
+            min(255, int(round(float(outline_opacity_value) * 255))),
+        )
+        fill_color = ColorHelper.normalize(fill_color_cfg)
+        fill_alpha = max(
+            0,
+            min(255, int(round(float(fill_opacity_value) * 255))),
+        )
         effective_scale_x = (
             image.width / clip_rect.width if clip_rect.width > 0 else self.scale
         )
@@ -351,16 +259,189 @@ class PdfPageRenderer:
         overlay = Image.new("RGBA", image.size, (0, 0, 0, 0))
         effective_scale = max(effective_scale_x, effective_scale_y)
         width_px = max(1, int(round(float(border_style.width) * effective_scale)))
-        fill_rgba = (*color, alpha) if border_style.fill else None
+        fill_rgba = (*fill_color, fill_alpha) if border_style.fill else None
 
         draw = ImageDraw.Draw(overlay, "RGBA")
         draw.rectangle(
             [local_rect.x0, local_rect.y0, local_rect.x1, local_rect.y1],
-            outline=(*color, alpha),
+            outline=(*outline_color, outline_alpha),
             fill=fill_rgba,
             width=width_px,
         )
+        if draw_arrow:
+            effective_arrow_style = arrow_style or ArrowStyle(
+                color=outline_color_cfg,
+                opacity=float(outline_opacity_value),
+                corner_gap=0.0,
+            )
+            self._draw_corner_arrow(
+                draw,
+                image_size=image.size,
+                target_rect=local_rect,
+                color=ColorHelper.normalize(effective_arrow_style.color),
+                alpha=max(
+                    0,
+                    min(255, int(round(float(effective_arrow_style.opacity) * 255))),
+                ),
+                corner_gap_px=float(effective_arrow_style.corner_gap) * effective_scale,
+            )
         return Image.alpha_composite(image, overlay)
+
+    def _draw_corner_arrow(
+        self,
+        draw: ImageDraw.ImageDraw,
+        image_size: tuple[int, int],
+        target_rect: fitz.Rect,
+        color: tuple[int, int, int],
+        alpha: int,
+        corner_gap_px: float,
+    ) -> None:
+        arrow_geometry = self._resolve_corner_arrow_geometry(
+            image_size,
+            target_rect,
+            corner_gap_px=corner_gap_px,
+        )
+        if arrow_geometry is None:
+            return
+
+        tail, tip, left_wing, right_wing, shaft_width = arrow_geometry
+        rgba = (*color, alpha)
+        draw.line([tail, tip], fill=rgba, width=shaft_width)
+        draw.polygon([tip, left_wing, right_wing], fill=rgba)
+
+    def _resolve_corner_arrow_geometry(
+        self,
+        image_size: tuple[int, int],
+        target_rect: fitz.Rect,
+        corner_gap_px: float = 0.0,
+    ) -> tuple[
+        tuple[float, float],
+        tuple[float, float],
+        tuple[float, float],
+        tuple[float, float],
+        int,
+    ] | None:
+        image_width, image_height = image_size
+        if image_width <= 0 or image_height <= 0:
+            return None
+
+        base_length = max(56.0, min(float(min(image_width, image_height)) * 0.18, 220.0))
+        margin = max(12.0, min(float(min(image_width, image_height)) * 0.03, 36.0))
+        shaft_width = max(4, int(round(min(image_width, image_height) * 0.006)))
+
+        candidates = [
+            ("top_left", (target_rect.x0, target_rect.y0), (-1.0, -1.0)),
+            ("top_right", (target_rect.x1, target_rect.y0), (1.0, -1.0)),
+            ("bottom_right", (target_rect.x1, target_rect.y1), (1.0, 1.0)),
+            ("bottom_left", (target_rect.x0, target_rect.y1), (-1.0, 1.0)),
+        ]
+        best_candidate: tuple[float, tuple[tuple[float, float], ...], int] | None = None
+
+        for _, tip, outward in candidates:
+            unit_outward = self._normalize_vector(outward)
+            if unit_outward is None:
+                continue
+            shifted_tip = (
+                tip[0] + unit_outward[0] * max(0.0, corner_gap_px),
+                tip[1] + unit_outward[1] * max(0.0, corner_gap_px),
+            )
+
+            max_length = self._max_arrow_length(
+                tip=shifted_tip,
+                outward=unit_outward,
+                image_width=image_width,
+                image_height=image_height,
+                margin=margin,
+            )
+            arrow_length = min(base_length, max_length)
+            min_visible_length = min(40.0, base_length * 0.6)
+            if arrow_length < min_visible_length:
+                continue
+
+            tail = (
+                shifted_tip[0] + unit_outward[0] * arrow_length,
+                shifted_tip[1] + unit_outward[1] * arrow_length,
+            )
+            line_unit = self._normalize_vector(
+                (shifted_tip[0] - tail[0], shifted_tip[1] - tail[1])
+            )
+            if line_unit is None:
+                continue
+
+            head_length = max(18.0, arrow_length * 0.32)
+            head_width = max(14.0, arrow_length * 0.24)
+            base_center = (
+                shifted_tip[0] - line_unit[0] * head_length,
+                shifted_tip[1] - line_unit[1] * head_length,
+            )
+            perp = (-line_unit[1], line_unit[0])
+            left_wing = (
+                base_center[0] + perp[0] * (head_width / 2),
+                base_center[1] + perp[1] * (head_width / 2),
+            )
+            right_wing = (
+                base_center[0] - perp[0] * (head_width / 2),
+                base_center[1] - perp[1] * (head_width / 2),
+            )
+            points = (tail, shifted_tip, left_wing, right_wing)
+            if not self._points_inside_image(points, image_width, image_height, margin=1.0):
+                continue
+
+            score = arrow_length
+            if best_candidate is None or score > best_candidate[0]:
+                best_candidate = (score, points, shaft_width)
+
+        if best_candidate is None:
+            return None
+
+        _, points, width = best_candidate
+        return points[0], points[1], points[2], points[3], width
+
+    @staticmethod
+    def _normalize_vector(
+        vector: tuple[float, float]
+    ) -> tuple[float, float] | None:
+        length = math.hypot(vector[0], vector[1])
+        if length == 0:
+            return None
+        return (vector[0] / length, vector[1] / length)
+
+    @staticmethod
+    def _max_arrow_length(
+        tip: tuple[float, float],
+        outward: tuple[float, float],
+        image_width: int,
+        image_height: int,
+        margin: float,
+    ) -> float:
+        limits: list[float] = []
+        if outward[0] < 0:
+            limits.append((tip[0] - margin) / abs(outward[0]))
+        elif outward[0] > 0:
+            limits.append(((image_width - margin) - tip[0]) / outward[0])
+
+        if outward[1] < 0:
+            limits.append((tip[1] - margin) / abs(outward[1]))
+        elif outward[1] > 0:
+            limits.append(((image_height - margin) - tip[1]) / outward[1])
+
+        if not limits:
+            return 0.0
+        return max(0.0, min(limits))
+
+    @staticmethod
+    def _points_inside_image(
+        points: Sequence[tuple[float, float]],
+        image_width: int,
+        image_height: int,
+        margin: float = 0.0,
+    ) -> bool:
+        for point_x, point_y in points:
+            if point_x < margin or point_x > (image_width - margin):
+                return False
+            if point_y < margin or point_y > (image_height - margin):
+                return False
+        return True
 
 
 class NearestLineBoxDetector:
@@ -458,89 +539,15 @@ class NearestLineBoxDetector:
         self,
         page: fitz.Page,
     ) -> tuple[list[AxisAlignedLine], list[AxisAlignedLine]]:
-        page_number = int(page.number)
-        cached = self._page_line_cache.get(page_number)
-        if cached is not None:
-            return cached
-
-        axis_tolerance = float(self.config.axis_tolerance)
-        min_length = min(5.0, float(self.config.min_length))
-        disk_cached = self.line_cache_store.load(
+        lines, _ = get_page_axis_lines(
+            page,
             self.pdf_path,
-            page_number,
-            axis_tolerance,
-            min_length,
+            self.line_cache_store,
+            axis_tolerance=float(self.config.axis_tolerance),
+            min_length=float(self.config.min_length),
+            memory_cache=self._page_line_cache,
         )
-        if disk_cached is not None:
-            self._page_line_cache[page_number] = disk_cached
-            logging.info(
-                "第 %s 页矢量线已从缓存加载: 垂直=%s, 水平=%s",
-                page_number + 1,
-                len(disk_cached[0]),
-                len(disk_cached[1]),
-            )
-            return disk_cached
-
-        vertical_lines: dict[tuple[str, float, float, float], AxisAlignedLine] = {}
-        horizontal_lines: dict[tuple[str, float, float, float], AxisAlignedLine] = {}
-        started_at = time.perf_counter()
-
-        for drawing in page.get_cdrawings():
-            for item in drawing.get("items", []):
-                if item[0] != "l":
-                    continue
-
-                start = RectHelper.to_render_point(page, fitz.Point(item[1]))
-                end = RectHelper.to_render_point(page, fitz.Point(item[2]))
-                delta_x = abs(start.x - end.x)
-                delta_y = abs(start.y - end.y)
-
-                if delta_x <= axis_tolerance and delta_y >= min_length:
-                    axis_value = round((start.x + end.x) / 2, 2)
-                    span_start = round(min(start.y, end.y), 2)
-                    span_end = round(max(start.y, end.y), 2)
-                    line = AxisAlignedLine(
-                        orientation="vertical",
-                        axis_value=axis_value,
-                        span_start=span_start,
-                        span_end=span_end,
-                    )
-                    vertical_lines[
-                        ("vertical", axis_value, span_start, span_end)
-                    ] = line
-                elif delta_y <= axis_tolerance and delta_x >= min_length:
-                    axis_value = round((start.y + end.y) / 2, 2)
-                    span_start = round(min(start.x, end.x), 2)
-                    span_end = round(max(start.x, end.x), 2)
-                    line = AxisAlignedLine(
-                        orientation="horizontal",
-                        axis_value=axis_value,
-                        span_start=span_start,
-                        span_end=span_end,
-                    )
-                    horizontal_lines[
-                        ("horizontal", axis_value, span_start, span_end)
-                    ] = line
-
-        cached_lines = (list(vertical_lines.values()), list(horizontal_lines.values()))
-        self.line_cache_store.save(
-            self.pdf_path,
-            page_number,
-            axis_tolerance,
-            min_length,
-            cached_lines[0],
-            cached_lines[1],
-        )
-        self._page_line_cache[page_number] = cached_lines
-        elapsed = time.perf_counter() - started_at
-        logging.info(
-            "第 %s 页矢量线提取完成: 垂直=%s, 水平=%s, 耗时=%.2fs",
-            page_number + 1,
-            len(cached_lines[0]),
-            len(cached_lines[1]),
-            elapsed,
-        )
-        return cached_lines
+        return lines
 
     def _pick_vertical_boundary(
         self,
@@ -864,6 +871,8 @@ class RegionScreenshotJob(KeywordScreenshotJob):
         border_rect: RectConfig | None = None,
         border_style: BorderStyle | None = None,
         line_box_detection: LineBoxDetectionConfig | None = None,
+        draw_arrow: bool = True,
+        arrow_style: ArrowStyle | None = None,
         dpi: float = 300,
     ) -> None:
         super().__init__(
@@ -876,6 +885,8 @@ class RegionScreenshotJob(KeywordScreenshotJob):
         )
         self.region_rect = region_rect
         self.border_rect = border_rect
+        self.draw_arrow = draw_arrow
+        self.arrow_style = arrow_style or ArrowStyle()
         self.line_box_detector = NearestLineBoxDetector(
             line_box_detection,
             pdf_path=pdf_path,
@@ -932,6 +943,8 @@ class RegionScreenshotJob(KeywordScreenshotJob):
                         actual_clip,
                         draw_rect,
                         self.border_style,
+                        draw_arrow=self.draw_arrow,
+                        arrow_style=self.arrow_style,
                     )
 
                     suffix = f"_{match_index}" if len(text_instances) > 1 else ""
@@ -1038,6 +1051,8 @@ def capture_region_screenshots(
     border_rect: RectConfig | None = None,
     border_style: BorderStyle | None = None,
     line_box_detection: LineBoxDetectionConfig | None = None,
+    draw_arrow: bool = True,
+    arrow_style: ArrowStyle | None = None,
     dpi: float = 300,
 ) -> list[ScreenshotResult]:
     """兼容旧调用方式的区域截图入口。"""
@@ -1050,5 +1065,7 @@ def capture_region_screenshots(
         border_rect=border_rect,
         border_style=border_style,
         line_box_detection=line_box_detection,
+        draw_arrow=draw_arrow,
+        arrow_style=arrow_style,
         dpi=dpi,
     ).run()

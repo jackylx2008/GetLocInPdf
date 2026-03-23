@@ -7,9 +7,13 @@
 - **[full_page_screenshot.py](full_page_screenshot.py)**  
   搜索关键字后，在指定的“全图区域”（可通过配置定义，如页面主体或忽略边距）生成截图，并在图中绘制关键字红框。
 - **[region_screenshot.py](region_screenshot.py)**  
-  搜索关键字后，以关键字中心为原点，根据配置的偏移量生成局部区域截图，并在图中绘制关键字红框（支持透明度配置）。
+  搜索关键字后，以关键字中心为原点，根据配置的偏移量生成局部区域截图，并在图中绘制关键字红框（支持透明度配置）；区域截图会自动补充一根箭头，并在红框四角中选择一个能够完整显示箭头的角点进行指向。
 - **[pdf_keyword_screenshot.py](pdf_keyword_screenshot.py)**  
   公共截图模块，封装 `PyMuPDF` 检索与坐标处理、`pypdfium2` 渲染和边框绘制逻辑，供其他脚本直接调用。
+- **[line_box_cache.py](line_box_cache.py)**  
+  独立的矢量线缓存模块，负责页面线段提取、缓存读写与预建缓存复用。
+- **[build_line_box_cache.py](build_line_box_cache.py)**  
+  批量预建缓存工具，可一次扫描 `PDF_PATH` 下所有 PDF 并生成矢量线缓存。
 - **[get_pdf_info.py](get_pdf_info.py)**  
   辅助工具，输出 PDF 每页的原始尺寸（Points），用于辅助配置 `config.yaml` 中的坐标范围。
 
@@ -36,6 +40,9 @@
 - `pdf.region_border_mode`：区域截图边框模式，支持 `nearest_line_box` 和 `fixed`。
 - `pdf.region_line_min_length` / `pdf.region_line_axis_tolerance` / `pdf.region_line_search_margin`：区域截图自动检索矢量边框时的线段过滤与搜索参数。
 - `pdf.region_line_cache_enabled` / `pdf.region_line_cache_dir`：缓存每页提取到的矢量线，默认目录为 `cache/line_boxes`，适合反复调参或重复处理同一份复杂 PDF。
+- `pdf.region_border_outline_color` / `pdf.region_border_outline_opacity`：区域截图红框边框颜色与透明度。
+- `pdf.region_border_fill_color` / `pdf.region_border_fill_opacity`：区域截图红框填充颜色与透明度。
+- `pdf.region_arrow_color` / `pdf.region_arrow_opacity` / `pdf.region_arrow_corner_gap`：区域截图箭头颜色、透明度，以及箭头尖端到红框角点的间距。
 - `pdf.full_page_dpi` / `pdf.region_dpi`：两种截图模式的 DPI。全图通常用 `100-300`，区域通常用 `1000-1200`。
 - `pdf.*_border_width`：边框线宽，会按 DPI 自动缩放。
 - `pdf.*_border_opacity`：边框透明度，范围 `0.0-1.0`。
@@ -48,6 +55,8 @@ GetLocInPdf/
 ├─ config.yaml                 # 主配置
 ├─ .env                        # 路径、DPI 等环境变量
 ├─ pdf_keyword_screenshot.py   # 公共截图核心
+├─ line_box_cache.py           # 矢量线缓存与预建缓存核心
+├─ build_line_box_cache.py     # 批量为 PDF_PATH 下 PDF 预建矢量线缓存
 ├─ full_page_screenshot.py     # 全图截图入口
 ├─ region_screenshot.py        # 区域截图入口
 ├─ get_pdf_info.py             # 页面尺寸查看工具
@@ -74,6 +83,9 @@ GetLocInPdf/
 - `pdf.region_keyword_border`: 关键字红框相对于中心点的偏移量。
 - `pdf.region_border_mode`: 区域截图红框模式，默认优先按关键词中心向四个方向检索最近的水平 / 垂直矢量线。
 - `pdf.region_line_cache_enabled`: 是否启用页面矢量线缓存。复杂图纸类 PDF 建议保持开启。
+- `pdf.region_border_outline_color` / `pdf.region_border_fill_color`: 分别控制区域截图红框边框和填充颜色。
+- `pdf.region_border_outline_opacity` / `pdf.region_border_fill_opacity`: 分别控制区域截图红框边框和填充透明度。
+- `pdf.region_arrow_color` / `pdf.region_arrow_opacity` / `pdf.region_arrow_corner_gap`: 控制箭头颜色、透明度和角点间距。
 
 如果 `nearest_line_box` 很慢，通常瓶颈在 `PyMuPDF` 的 `get_cdrawings()` 提取页面矢量元素，而不是简单的命中几何筛选。此时更推荐：
 
@@ -88,6 +100,7 @@ GetLocInPdf/
 ### 2. 生成截图
 - 运行 `python full_page_screenshot.py` 生成全页/大区截图。
 - 运行 `python region_screenshot.py` 生成局部截图。
+- 如需提前预热缓存，运行 `python build_line_box_cache.py`，会递归扫描 `PDF_PATH` 下所有 PDF。
 
 ### 3. 在其他脚本中直接调用
 ```python
