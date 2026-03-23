@@ -1,4 +1,5 @@
 import logging
+import math
 import os
 import shutil
 from abc import ABC, abstractmethod
@@ -9,6 +10,7 @@ import fitz  # PyMuPDF，用于文本检索、页面几何信息和坐标处理
 import pypdfium2 as pdfium
 import yaml
 from dotenv import load_dotenv
+from line_box_cache import AxisAlignedLine, LineCacheStore, get_page_axis_lines
 from PIL import Image, ImageDraw
 
 # 加载环境变量
@@ -26,6 +28,19 @@ class BorderStyle:
     color: ColorConfig = (255, 0, 0)
     opacity: float = 1.0
     fill: bool = False
+    outline_color: ColorConfig | None = None
+    outline_opacity: float | None = None
+    fill_color: ColorConfig | None = None
+    fill_opacity: float | None = None
+
+
+@dataclass(frozen=True)
+class ArrowStyle:
+    """区域截图箭头样式。"""
+
+    color: ColorConfig = (255, 0, 0)
+    opacity: float = 1.0
+    corner_gap: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -45,6 +60,18 @@ class PageContext:
     page_number: int
     fitz_page: fitz.Page
     pdfium_page: pdfium.PdfPage
+
+
+@dataclass(frozen=True)
+class LineBoxDetectionConfig:
+    """区域截图中基于矢量线自动识别红框的配置。"""
+
+    mode: str = "nearest_line_box"
+    min_length: float = 20.0
+    axis_tolerance: float = 0.5
+    search_margin: float = 200.0
+    cache_enabled: bool = True
+    cache_dir: str = "cache/line_boxes"
 
 
 class ConfigLoader:
@@ -72,6 +99,12 @@ class OutputManager:
 
 class RectHelper:
     """PDF 坐标与截图区域辅助工具。"""
+
+    @staticmethod
+    def to_render_point(page: fitz.Page, point: fitz.Point) -> fitz.Point:
+        if page.rotation == 0:
+            return fitz.Point(point)
+        return fitz.Point(point) * page.rotation_matrix
 
     @staticmethod
     def to_render_rect(page: fitz.Page, rect: fitz.Rect) -> fitz.Rect:
@@ -164,7 +197,7 @@ class PdfPageRenderer:
             clip_rect.y0,
         )
         bitmap = pdfium_page.render(
-            scale=int(round(self.scale)),
+            scale=self.scale,
             crop=crop,
             rev_byteorder=True,
         )
@@ -176,29 +209,881 @@ class PdfPageRenderer:
         clip_rect: fitz.Rect,
         border_rect: fitz.Rect,
         border_style: BorderStyle,
+        draw_arrow: bool = False,
+        arrow_style: ArrowStyle | None = None,
     ) -> Image.Image:
-        color = ColorHelper.normalize(border_style.color)
-        alpha = max(0, min(255, int(round(float(border_style.opacity) * 255))))
+        outline_color_cfg = (
+            border_style.outline_color
+            if border_style.outline_color is not None
+            else border_style.color
+        )
+        outline_opacity_value = (
+            border_style.outline_opacity
+            if border_style.outline_opacity is not None
+            else border_style.opacity
+        )
+        fill_color_cfg = (
+            border_style.fill_color
+            if border_style.fill_color is not None
+            else outline_color_cfg
+        )
+        fill_opacity_value = (
+            border_style.fill_opacity
+            if border_style.fill_opacity is not None
+            else outline_opacity_value
+        )
+        outline_color = ColorHelper.normalize(outline_color_cfg)
+        outline_alpha = max(
+            0,
+            min(255, int(round(float(outline_opacity_value) * 255))),
+        )
+        fill_color = ColorHelper.normalize(fill_color_cfg)
+        fill_alpha = max(
+            0,
+            min(255, int(round(float(fill_opacity_value) * 255))),
+        )
+        effective_scale_x = (
+            image.width / clip_rect.width if clip_rect.width > 0 else self.scale
+        )
+        effective_scale_y = (
+            image.height / clip_rect.height if clip_rect.height > 0 else self.scale
+        )
         local_rect = fitz.Rect(
-            (border_rect.x0 - clip_rect.x0) * self.scale,
-            (border_rect.y0 - clip_rect.y0) * self.scale,
-            (border_rect.x1 - clip_rect.x0) * self.scale,
-            (border_rect.y1 - clip_rect.y0) * self.scale,
+            (border_rect.x0 - clip_rect.x0) * effective_scale_x,
+            (border_rect.y0 - clip_rect.y0) * effective_scale_y,
+            (border_rect.x1 - clip_rect.x0) * effective_scale_x,
+            (border_rect.y1 - clip_rect.y0) * effective_scale_y,
         )
         local_rect.normalize()
 
         overlay = Image.new("RGBA", image.size, (0, 0, 0, 0))
-        width_px = max(1, int(round(float(border_style.width) * self.scale)))
-        fill_rgba = (*color, alpha) if border_style.fill else None
+        effective_scale = max(effective_scale_x, effective_scale_y)
+        width_px = max(1, int(round(float(border_style.width) * effective_scale)))
+        fill_rgba = (*fill_color, fill_alpha) if border_style.fill else None
 
         draw = ImageDraw.Draw(overlay, "RGBA")
         draw.rectangle(
             [local_rect.x0, local_rect.y0, local_rect.x1, local_rect.y1],
-            outline=(*color, alpha),
+            outline=(*outline_color, outline_alpha),
             fill=fill_rgba,
             width=width_px,
         )
+        if draw_arrow:
+            effective_arrow_style = arrow_style or ArrowStyle(
+                color=outline_color_cfg,
+                opacity=float(outline_opacity_value),
+                corner_gap=0.0,
+            )
+            self._draw_corner_arrow(
+                draw,
+                image_size=image.size,
+                target_rect=local_rect,
+                color=ColorHelper.normalize(effective_arrow_style.color),
+                alpha=max(
+                    0,
+                    min(255, int(round(float(effective_arrow_style.opacity) * 255))),
+                ),
+                corner_gap_px=float(effective_arrow_style.corner_gap) * effective_scale,
+            )
         return Image.alpha_composite(image, overlay)
+
+    def _draw_corner_arrow(
+        self,
+        draw: ImageDraw.ImageDraw,
+        image_size: tuple[int, int],
+        target_rect: fitz.Rect,
+        color: tuple[int, int, int],
+        alpha: int,
+        corner_gap_px: float,
+    ) -> None:
+        arrow_geometry = self._resolve_corner_arrow_geometry(
+            image_size,
+            target_rect,
+            corner_gap_px=corner_gap_px,
+        )
+        if arrow_geometry is None:
+            return
+
+        tail, tip, left_wing, right_wing, shaft_width = arrow_geometry
+        rgba = (*color, alpha)
+        draw.line([tail, tip], fill=rgba, width=shaft_width)
+        draw.polygon([tip, left_wing, right_wing], fill=rgba)
+
+    def _resolve_corner_arrow_geometry(
+        self,
+        image_size: tuple[int, int],
+        target_rect: fitz.Rect,
+        corner_gap_px: float = 0.0,
+    ) -> tuple[
+        tuple[float, float],
+        tuple[float, float],
+        tuple[float, float],
+        tuple[float, float],
+        int,
+    ] | None:
+        image_width, image_height = image_size
+        if image_width <= 0 or image_height <= 0:
+            return None
+
+        base_length = max(56.0, min(float(min(image_width, image_height)) * 0.18, 220.0))
+        margin = max(12.0, min(float(min(image_width, image_height)) * 0.03, 36.0))
+        shaft_width = max(4, int(round(min(image_width, image_height) * 0.006)))
+
+        candidates = [
+            ("top_left", (target_rect.x0, target_rect.y0), (-1.0, -1.0)),
+            ("top_right", (target_rect.x1, target_rect.y0), (1.0, -1.0)),
+            ("bottom_right", (target_rect.x1, target_rect.y1), (1.0, 1.0)),
+            ("bottom_left", (target_rect.x0, target_rect.y1), (-1.0, 1.0)),
+        ]
+        best_candidate: tuple[float, tuple[tuple[float, float], ...], int] | None = None
+
+        for _, tip, outward in candidates:
+            unit_outward = self._normalize_vector(outward)
+            if unit_outward is None:
+                continue
+            shifted_tip = (
+                tip[0] + unit_outward[0] * max(0.0, corner_gap_px),
+                tip[1] + unit_outward[1] * max(0.0, corner_gap_px),
+            )
+
+            max_length = self._max_arrow_length(
+                tip=shifted_tip,
+                outward=unit_outward,
+                image_width=image_width,
+                image_height=image_height,
+                margin=margin,
+            )
+            arrow_length = min(base_length, max_length)
+            min_visible_length = min(40.0, base_length * 0.6)
+            if arrow_length < min_visible_length:
+                continue
+
+            tail = (
+                shifted_tip[0] + unit_outward[0] * arrow_length,
+                shifted_tip[1] + unit_outward[1] * arrow_length,
+            )
+            line_unit = self._normalize_vector(
+                (shifted_tip[0] - tail[0], shifted_tip[1] - tail[1])
+            )
+            if line_unit is None:
+                continue
+
+            head_length = max(18.0, arrow_length * 0.32)
+            head_width = max(14.0, arrow_length * 0.24)
+            base_center = (
+                shifted_tip[0] - line_unit[0] * head_length,
+                shifted_tip[1] - line_unit[1] * head_length,
+            )
+            perp = (-line_unit[1], line_unit[0])
+            left_wing = (
+                base_center[0] + perp[0] * (head_width / 2),
+                base_center[1] + perp[1] * (head_width / 2),
+            )
+            right_wing = (
+                base_center[0] - perp[0] * (head_width / 2),
+                base_center[1] - perp[1] * (head_width / 2),
+            )
+            points = (tail, shifted_tip, left_wing, right_wing)
+            if not self._points_inside_image(points, image_width, image_height, margin=1.0):
+                continue
+
+            score = arrow_length
+            if best_candidate is None or score > best_candidate[0]:
+                best_candidate = (score, points, shaft_width)
+
+        if best_candidate is None:
+            return None
+
+        _, points, width = best_candidate
+        return points[0], points[1], points[2], points[3], width
+
+    @staticmethod
+    def _normalize_vector(
+        vector: tuple[float, float]
+    ) -> tuple[float, float] | None:
+        length = math.hypot(vector[0], vector[1])
+        if length == 0:
+            return None
+        return (vector[0] / length, vector[1] / length)
+
+    @staticmethod
+    def _max_arrow_length(
+        tip: tuple[float, float],
+        outward: tuple[float, float],
+        image_width: int,
+        image_height: int,
+        margin: float,
+    ) -> float:
+        limits: list[float] = []
+        if outward[0] < 0:
+            limits.append((tip[0] - margin) / abs(outward[0]))
+        elif outward[0] > 0:
+            limits.append(((image_width - margin) - tip[0]) / outward[0])
+
+        if outward[1] < 0:
+            limits.append((tip[1] - margin) / abs(outward[1]))
+        elif outward[1] > 0:
+            limits.append(((image_height - margin) - tip[1]) / outward[1])
+
+        if not limits:
+            return 0.0
+        return max(0.0, min(limits))
+
+    @staticmethod
+    def _points_inside_image(
+        points: Sequence[tuple[float, float]],
+        image_width: int,
+        image_height: int,
+        margin: float = 0.0,
+    ) -> bool:
+        for point_x, point_y in points:
+            if point_x < margin or point_x > (image_width - margin):
+                return False
+            if point_y < margin or point_y > (image_height - margin):
+                return False
+        return True
+
+
+class NearestLineBoxDetector:
+    """根据关键词中心向四个方向检索最近的水平 / 垂直边线。"""
+
+    def __init__(
+        self,
+        config: LineBoxDetectionConfig | None = None,
+        pdf_path: str | None = None,
+    ) -> None:
+        self.config = config or LineBoxDetectionConfig()
+        self.pdf_path = os.path.abspath(pdf_path) if pdf_path else None
+        self.line_cache_store = LineCacheStore(
+            cache_dir=self.config.cache_dir,
+            enabled=self.config.cache_enabled,
+        )
+        self._page_line_cache: dict[
+            int, tuple[list[AxisAlignedLine], list[AxisAlignedLine]]
+        ] = {}
+
+    def detect(self, page: fitz.Page, keyword_rect: fitz.Rect) -> fitz.Rect | None:
+        if self.config.mode != "nearest_line_box":
+            return None
+
+        center_x = (keyword_rect.x0 + keyword_rect.x1) / 2
+        center_y = (keyword_rect.y0 + keyword_rect.y1) / 2
+        vertical_lines, horizontal_lines = self._collect_lines(page)
+        boundary_vertical_lines, boundary_horizontal_lines = self._prepare_boundary_lines(
+            vertical_lines,
+            horizontal_lines,
+        )
+        room_rect = self._detect_smallest_enclosing_room(
+            boundary_vertical_lines,
+            boundary_horizontal_lines,
+            keyword_rect,
+        )
+        if room_rect is not None:
+            return self._refine_room_rect(
+                room_rect,
+                boundary_vertical_lines,
+                boundary_horizontal_lines,
+                keyword_rect,
+            )
+
+        # 回退到旧的“就近边框”策略，尽量保持原有兼容性。
+        projection_tolerance = max(1.0, float(self.config.axis_tolerance) * 2)
+        primary_min_length = float(self.config.min_length)
+
+        left = self._pick_vertical_boundary(
+            boundary_vertical_lines or vertical_lines,
+            center_x,
+            center_y,
+            direction="left",
+            projection_tolerance=projection_tolerance,
+            min_length=primary_min_length,
+        )
+        right = self._pick_vertical_boundary(
+            boundary_vertical_lines or vertical_lines,
+            center_x,
+            center_y,
+            direction="right",
+            projection_tolerance=projection_tolerance,
+            min_length=primary_min_length,
+        )
+
+        if not all((left, right)):
+            return None
+
+        top = self._pick_horizontal_closing_boundary(
+            boundary_horizontal_lines or horizontal_lines,
+            left,
+            right,
+            center_y,
+            direction="up",
+        ) or self._pick_horizontal_boundary(
+            boundary_horizontal_lines or horizontal_lines,
+            center_x,
+            center_y,
+            direction="up",
+            projection_tolerance=projection_tolerance,
+            min_length=primary_min_length,
+        )
+        bottom = self._pick_horizontal_closing_boundary(
+            boundary_horizontal_lines or horizontal_lines,
+            left,
+            right,
+            center_y,
+            direction="down",
+        ) or self._pick_horizontal_boundary(
+            boundary_horizontal_lines or horizontal_lines,
+            center_x,
+            center_y,
+            direction="down",
+            projection_tolerance=projection_tolerance,
+            min_length=primary_min_length,
+        )
+
+        if not all((top, bottom)):
+            return None
+        if left.axis_value >= right.axis_value or top.axis_value >= bottom.axis_value:
+            return None
+
+        border_rect = fitz.Rect(
+            left.axis_value,
+            top.axis_value,
+            right.axis_value,
+            bottom.axis_value,
+        )
+        border_rect.normalize()
+        return border_rect
+
+    def _prepare_boundary_lines(
+        self,
+        vertical_lines: Sequence[AxisAlignedLine],
+        horizontal_lines: Sequence[AxisAlignedLine],
+    ) -> tuple[list[AxisAlignedLine], list[AxisAlignedLine]]:
+        filtered_vertical = self._filter_room_boundary_lines(vertical_lines)
+        filtered_horizontal = self._filter_room_boundary_lines(horizontal_lines)
+        return (
+            self._merge_axis_lines(filtered_vertical),
+            self._merge_axis_lines(filtered_horizontal),
+        )
+
+    def _filter_room_boundary_lines(
+        self,
+        lines: Sequence[AxisAlignedLine],
+    ) -> list[AxisAlignedLine]:
+        filtered_lines = [
+            line for line in lines if self._is_room_boundary_layer(line.layer)
+        ]
+        return filtered_lines if filtered_lines else list(lines)
+
+    def _is_room_boundary_layer(self, layer: str | None) -> bool:
+        if not layer:
+            return False
+
+        layer_upper = layer.upper()
+        if layer_upper == "A-WALL":
+            return True
+        return "00-WALL" in layer_upper
+
+    def _merge_axis_lines(
+        self,
+        lines: Sequence[AxisAlignedLine],
+    ) -> list[AxisAlignedLine]:
+        if not lines:
+            return []
+
+        axis_merge_tolerance = max(0.5, float(self.config.axis_tolerance) * 2)
+        span_gap_tolerance = max(3.0, float(self.config.axis_tolerance) * 10)
+        sorted_lines = sorted(
+            lines,
+            key=lambda line: (
+                line.orientation,
+                line.layer or "",
+                round(line.axis_value / axis_merge_tolerance),
+                line.span_start,
+                line.span_end,
+            ),
+        )
+        merged_lines: list[AxisAlignedLine] = []
+
+        for line in sorted_lines:
+            if not merged_lines:
+                merged_lines.append(line)
+                continue
+
+            previous = merged_lines[-1]
+            same_group = (
+                previous.orientation == line.orientation
+                and (previous.layer or "") == (line.layer or "")
+                and abs(previous.axis_value - line.axis_value) <= axis_merge_tolerance
+                and line.span_start <= (previous.span_end + span_gap_tolerance)
+            )
+            if not same_group:
+                merged_lines.append(line)
+                continue
+
+            merged_lines[-1] = AxisAlignedLine(
+                orientation=previous.orientation,
+                axis_value=round((previous.axis_value + line.axis_value) / 2, 2),
+                span_start=min(previous.span_start, line.span_start),
+                span_end=max(previous.span_end, line.span_end),
+                layer=previous.layer or line.layer,
+            )
+
+        return merged_lines
+
+    def _detect_smallest_enclosing_room(
+        self,
+        vertical_lines: Sequence[AxisAlignedLine],
+        horizontal_lines: Sequence[AxisAlignedLine],
+        keyword_rect: fitz.Rect,
+    ) -> fitz.Rect | None:
+        if not vertical_lines or not horizontal_lines:
+            return None
+
+        center_x = (keyword_rect.x0 + keyword_rect.x1) / 2
+        center_y = (keyword_rect.y0 + keyword_rect.y1) / 2
+        projection_tolerance = max(1.0, float(self.config.axis_tolerance) * 2)
+        search_margin = float(self.config.search_margin)
+        min_room_width = max(
+            keyword_rect.width + projection_tolerance * 2,
+            12.0,
+        )
+        min_room_height = max(
+            keyword_rect.height + projection_tolerance * 6,
+            12.0,
+        )
+        min_clearance = max(2.0, projection_tolerance)
+
+        left_candidates = [
+            line
+            for line in vertical_lines
+            if line.axis_value < center_x
+            and line.covers(center_y, projection_tolerance)
+            and (center_x - line.axis_value) <= search_margin
+        ]
+        right_candidates = [
+            line
+            for line in vertical_lines
+            if line.axis_value > center_x
+            and line.covers(center_y, projection_tolerance)
+            and (line.axis_value - center_x) <= search_margin
+        ]
+        left_candidates = sorted(left_candidates, key=lambda line: center_x - line.axis_value)[:16]
+        right_candidates = sorted(right_candidates, key=lambda line: line.axis_value - center_x)[:16]
+
+        candidates: list[tuple[float, float, float, fitz.Rect]] = []
+        for left in left_candidates:
+            for right in right_candidates:
+                if left.axis_value >= right.axis_value:
+                    continue
+
+                width = right.axis_value - left.axis_value
+                if width < min_room_width:
+                    continue
+
+                top_candidates = self._find_closing_boundaries(
+                    horizontal_lines,
+                    left.axis_value,
+                    right.axis_value,
+                    center_y,
+                    direction="up",
+                )[:12]
+                bottom_candidates = self._find_closing_boundaries(
+                    horizontal_lines,
+                    left.axis_value,
+                    right.axis_value,
+                    center_y,
+                    direction="down",
+                )[:12]
+
+                for top in top_candidates:
+                    for bottom in bottom_candidates:
+                        if top.axis_value >= bottom.axis_value:
+                            continue
+
+                        height = bottom.axis_value - top.axis_value
+                        if height < min_room_height:
+                            continue
+
+                        border_rect = fitz.Rect(
+                            left.axis_value,
+                            top.axis_value,
+                            right.axis_value,
+                            bottom.axis_value,
+                        )
+                        border_rect.normalize()
+                        if not self._rect_contains_point(
+                            border_rect,
+                            center_x,
+                            center_y,
+                            tolerance=projection_tolerance,
+                        ):
+                            continue
+
+                        clearances = (
+                            center_x - border_rect.x0,
+                            border_rect.x1 - center_x,
+                            center_y - border_rect.y0,
+                            border_rect.y1 - center_y,
+                        )
+                        if min(clearances) < min_clearance:
+                            continue
+
+                        area = border_rect.width * border_rect.height
+                        perimeter = border_rect.width + border_rect.height
+                        distance_penalty = (
+                            (center_x - left.axis_value)
+                            + (right.axis_value - center_x)
+                            + (center_y - top.axis_value)
+                            + (bottom.axis_value - center_y)
+                        )
+                        candidates.append(
+                            (
+                                area,
+                                perimeter,
+                                distance_penalty,
+                                border_rect,
+                            )
+                        )
+
+        if not candidates:
+            return None
+        return min(candidates)[3]
+
+    def _refine_room_rect(
+        self,
+        border_rect: fitz.Rect,
+        vertical_lines: Sequence[AxisAlignedLine],
+        horizontal_lines: Sequence[AxisAlignedLine],
+        keyword_rect: fitz.Rect,
+    ) -> fitz.Rect:
+        center_x = (keyword_rect.x0 + keyword_rect.x1) / 2
+        center_y = (keyword_rect.y0 + keyword_rect.y1) / 2
+        projection_tolerance = max(1.0, float(self.config.axis_tolerance) * 2)
+        distance_band = max(1.0, float(self.config.axis_tolerance) * 2)
+
+        left = self._pick_inward_vertical_boundary(
+            vertical_lines,
+            center_x,
+            center_y,
+            border_rect,
+            direction="left",
+            projection_tolerance=projection_tolerance,
+            distance_band=distance_band,
+        )
+        right = self._pick_inward_vertical_boundary(
+            vertical_lines,
+            center_x,
+            center_y,
+            border_rect,
+            direction="right",
+            projection_tolerance=projection_tolerance,
+            distance_band=distance_band,
+        )
+        top = self._pick_inward_horizontal_boundary(
+            horizontal_lines,
+            center_x,
+            center_y,
+            border_rect,
+            direction="up",
+            projection_tolerance=projection_tolerance,
+            distance_band=distance_band,
+        )
+        bottom = self._pick_inward_horizontal_boundary(
+            horizontal_lines,
+            center_x,
+            center_y,
+            border_rect,
+            direction="down",
+            projection_tolerance=projection_tolerance,
+            distance_band=distance_band,
+        )
+
+        refined = fitz.Rect(
+            left.axis_value if left is not None else border_rect.x0,
+            top.axis_value if top is not None else border_rect.y0,
+            right.axis_value if right is not None else border_rect.x1,
+            bottom.axis_value if bottom is not None else border_rect.y1,
+        )
+        refined.normalize()
+        if (
+            refined.x0 >= refined.x1
+            or refined.y0 >= refined.y1
+            or not self._rect_contains_point(
+                refined,
+                center_x,
+                center_y,
+                tolerance=projection_tolerance,
+            )
+        ):
+            return border_rect
+        return refined
+
+    def _pick_inward_vertical_boundary(
+        self,
+        lines: Sequence[AxisAlignedLine],
+        center_x: float,
+        center_y: float,
+        border_rect: fitz.Rect,
+        direction: str,
+        projection_tolerance: float,
+        distance_band: float,
+    ) -> AxisAlignedLine | None:
+        candidates: list[tuple[float, float, float, AxisAlignedLine]] = []
+
+        for line in lines:
+            if not line.covers(center_y, projection_tolerance):
+                continue
+            if direction == "left":
+                if line.axis_value < border_rect.x0 or line.axis_value >= center_x:
+                    continue
+                distance = center_x - line.axis_value
+                axis_rank = -line.axis_value
+            else:
+                if line.axis_value > border_rect.x1 or line.axis_value <= center_x:
+                    continue
+                distance = line.axis_value - center_x
+                axis_rank = line.axis_value
+
+            candidates.append((distance, -line.length, axis_rank, line))
+
+        if not candidates:
+            return None
+
+        nearest_distance = min(candidate[0] for candidate in candidates)
+        shortlisted = [
+            candidate
+            for candidate in candidates
+            if candidate[0] <= (nearest_distance + distance_band)
+        ]
+        return min(shortlisted, key=lambda candidate: (candidate[1], candidate[0], candidate[2]))[3]
+
+    def _pick_inward_horizontal_boundary(
+        self,
+        lines: Sequence[AxisAlignedLine],
+        center_x: float,
+        center_y: float,
+        border_rect: fitz.Rect,
+        direction: str,
+        projection_tolerance: float,
+        distance_band: float,
+    ) -> AxisAlignedLine | None:
+        candidates: list[tuple[float, float, float, AxisAlignedLine]] = []
+
+        for line in lines:
+            if not line.covers(center_x, projection_tolerance):
+                continue
+            if direction == "up":
+                if line.axis_value < border_rect.y0 or line.axis_value >= center_y:
+                    continue
+                distance = center_y - line.axis_value
+                axis_rank = -line.axis_value
+            else:
+                if line.axis_value > border_rect.y1 or line.axis_value <= center_y:
+                    continue
+                distance = line.axis_value - center_y
+                axis_rank = line.axis_value
+
+            candidates.append((distance, -line.length, axis_rank, line))
+
+        if not candidates:
+            return None
+
+        nearest_distance = min(candidate[0] for candidate in candidates)
+        shortlisted = [
+            candidate
+            for candidate in candidates
+            if candidate[0] <= (nearest_distance + distance_band)
+        ]
+        return min(shortlisted, key=lambda candidate: (candidate[1], candidate[0], candidate[2]))[3]
+
+    def _find_closing_boundaries(
+        self,
+        lines: Sequence[AxisAlignedLine],
+        interval_start: float,
+        interval_end: float,
+        center_y: float,
+        direction: str,
+    ) -> list[AxisAlignedLine]:
+        endpoint_tolerance = max(3.0, float(self.config.axis_tolerance) * 10)
+        candidates: list[tuple[float, float, float, AxisAlignedLine]] = []
+
+        for line in lines:
+            if direction == "up":
+                distance = center_y - line.axis_value
+            else:
+                distance = line.axis_value - center_y
+
+            if distance <= 0 or distance > float(self.config.search_margin):
+                continue
+
+            left_gap = self._line_edge_gap(line, interval_start)
+            right_gap = self._line_edge_gap(line, interval_end)
+            overlap = min(line.span_end, interval_end) - max(line.span_start, interval_start)
+            if overlap <= 0:
+                continue
+            if left_gap > endpoint_tolerance or right_gap > endpoint_tolerance:
+                continue
+
+            candidates.append(
+                (
+                    distance,
+                    left_gap + right_gap,
+                    -overlap,
+                    line,
+                )
+            )
+
+        return [candidate[3] for candidate in sorted(candidates)]
+
+    @staticmethod
+    def _rect_contains_point(
+        outer_rect: fitz.Rect,
+        point_x: float,
+        point_y: float,
+        tolerance: float = 0.0,
+    ) -> bool:
+        return (
+            outer_rect.x0 <= (point_x + tolerance)
+            and outer_rect.y0 <= (point_y + tolerance)
+            and outer_rect.x1 >= (point_x - tolerance)
+            and outer_rect.y1 >= (point_y - tolerance)
+        )
+
+    def _collect_lines(
+        self,
+        page: fitz.Page,
+    ) -> tuple[list[AxisAlignedLine], list[AxisAlignedLine]]:
+        lines, _ = get_page_axis_lines(
+            page,
+            self.pdf_path,
+            self.line_cache_store,
+            axis_tolerance=float(self.config.axis_tolerance),
+            min_length=float(self.config.min_length),
+            memory_cache=self._page_line_cache,
+        )
+        return lines
+
+    def _pick_vertical_boundary(
+        self,
+        lines: Sequence[AxisAlignedLine],
+        center_x: float,
+        center_y: float,
+        direction: str,
+        projection_tolerance: float,
+        min_length: float,
+    ) -> AxisAlignedLine | None:
+        candidates: list[tuple[float, float, float, AxisAlignedLine]] = []
+
+        for line in lines:
+            if line.length < min_length:
+                continue
+            if not line.covers(center_y, projection_tolerance):
+                continue
+
+            if direction == "left":
+                distance = center_x - line.axis_value
+            else:
+                distance = line.axis_value - center_x
+
+            if distance <= 0 or distance > float(self.config.search_margin):
+                continue
+
+            candidates.append(
+                (distance, -line.length, line.axis_value, line)
+            )
+
+        if not candidates:
+            return None
+        return min(candidates)[3]
+
+    def _pick_horizontal_boundary(
+        self,
+        lines: Sequence[AxisAlignedLine],
+        center_x: float,
+        center_y: float,
+        direction: str,
+        projection_tolerance: float,
+        min_length: float,
+    ) -> AxisAlignedLine | None:
+        candidates: list[tuple[float, float, float, AxisAlignedLine]] = []
+
+        for line in lines:
+            if line.length < min_length:
+                continue
+            if not line.covers(center_x, projection_tolerance):
+                continue
+
+            if direction == "up":
+                distance = center_y - line.axis_value
+            else:
+                distance = line.axis_value - center_y
+
+            if distance <= 0 or distance > float(self.config.search_margin):
+                continue
+
+            candidates.append(
+                (distance, -line.length, line.axis_value, line)
+            )
+
+        if not candidates:
+            return None
+        return min(candidates)[3]
+
+    def _pick_horizontal_closing_boundary(
+        self,
+        lines: Sequence[AxisAlignedLine],
+        left: AxisAlignedLine,
+        right: AxisAlignedLine,
+        center_y: float,
+        direction: str,
+    ) -> AxisAlignedLine | None:
+        interval_start = left.axis_value
+        interval_end = right.axis_value
+        endpoint_tolerance = max(2.5, float(self.config.axis_tolerance) * 6)
+        candidates: list[tuple[float, float, float, AxisAlignedLine]] = []
+
+        for line in lines:
+            if direction == "up":
+                distance = center_y - line.axis_value
+            else:
+                distance = line.axis_value - center_y
+
+            if distance <= 0 or distance > float(self.config.search_margin):
+                continue
+
+            left_gap = self._line_edge_gap(line, interval_start)
+            right_gap = self._line_edge_gap(line, interval_end)
+            if left_gap > endpoint_tolerance or right_gap > endpoint_tolerance:
+                continue
+
+            overlap = min(line.span_end, interval_end) - max(line.span_start, interval_start)
+            if overlap <= 0:
+                continue
+
+            candidates.append(
+                (
+                    distance,
+                    left_gap + right_gap,
+                    -overlap,
+                    line.axis_value,
+                    line.span_start,
+                    line.span_end,
+                    line,
+                )
+            )
+
+        if not candidates:
+            return None
+        return min(candidates)[6]
+
+    @staticmethod
+    def _line_edge_gap(line: AxisAlignedLine, boundary_value: float) -> float:
+        if line.covers(boundary_value):
+            return 0.0
+        return min(
+            abs(line.span_start - boundary_value),
+            abs(line.span_end - boundary_value),
+        )
 
 
 class PdfKeywordDocument:
@@ -399,6 +1284,9 @@ class RegionScreenshotJob(KeywordScreenshotJob):
         region_rect: RectConfig,
         border_rect: RectConfig | None = None,
         border_style: BorderStyle | None = None,
+        line_box_detection: LineBoxDetectionConfig | None = None,
+        draw_arrow: bool = True,
+        arrow_style: ArrowStyle | None = None,
         dpi: float = 300,
     ) -> None:
         super().__init__(
@@ -411,6 +1299,12 @@ class RegionScreenshotJob(KeywordScreenshotJob):
         )
         self.region_rect = region_rect
         self.border_rect = border_rect
+        self.draw_arrow = draw_arrow
+        self.arrow_style = arrow_style or ArrowStyle()
+        self.line_box_detector = NearestLineBoxDetector(
+            line_box_detection,
+            pdf_path=pdf_path,
+        )
 
     def default_border_style(self) -> BorderStyle:
         return BorderStyle(fill=True)
@@ -463,6 +1357,8 @@ class RegionScreenshotJob(KeywordScreenshotJob):
                         actual_clip,
                         draw_rect,
                         self.border_style,
+                        draw_arrow=self.draw_arrow,
+                        arrow_style=self.arrow_style,
                     )
 
                     suffix = f"_{match_index}" if len(text_instances) > 1 else ""
@@ -498,7 +1394,20 @@ class RegionScreenshotJob(KeywordScreenshotJob):
         source_inst: fitz.Rect,
         render_inst: fitz.Rect,
     ) -> fitz.Rect:
+        auto_border_rect = self.line_box_detector.detect(page.fitz_page, render_inst)
+        if auto_border_rect is not None:
+            logging.info(
+                "第 %s 页使用就近矢量线边框: %s",
+                page.page_number,
+                auto_border_rect,
+            )
+            return auto_border_rect
+
         if not self.border_rect:
+            logging.warning(
+                "第 %s 页未找到就近矢量线边框，已回退到关键字原始框。",
+                page.page_number,
+            )
             return fitz.Rect(render_inst)
 
         source_center_x, source_center_y = self._keyword_center(source_inst)
@@ -506,6 +1415,10 @@ class RegionScreenshotJob(KeywordScreenshotJob):
             source_center_x,
             source_center_y,
             self.border_rect,
+        )
+        logging.warning(
+            "第 %s 页未找到就近矢量线边框，已回退到配置边框。",
+            page.page_number,
         )
         return RectHelper.to_render_rect(page.fitz_page, source_border_rect)
 
@@ -551,6 +1464,9 @@ def capture_region_screenshots(
     region_rect: RectConfig,
     border_rect: RectConfig | None = None,
     border_style: BorderStyle | None = None,
+    line_box_detection: LineBoxDetectionConfig | None = None,
+    draw_arrow: bool = True,
+    arrow_style: ArrowStyle | None = None,
     dpi: float = 300,
 ) -> list[ScreenshotResult]:
     """兼容旧调用方式的区域截图入口。"""
@@ -562,5 +1478,8 @@ def capture_region_screenshots(
         region_rect=region_rect,
         border_rect=border_rect,
         border_style=border_style,
+        line_box_detection=line_box_detection,
+        draw_arrow=draw_arrow,
+        arrow_style=arrow_style,
         dpi=dpi,
     ).run()
