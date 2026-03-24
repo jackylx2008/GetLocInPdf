@@ -11,9 +11,9 @@
 - **[pdf_keyword_screenshot.py](pdf_keyword_screenshot.py)**  
   公共截图模块，封装 `PyMuPDF` 检索与坐标处理、`pypdfium2` 渲染和边框绘制逻辑，供其他脚本直接调用。
 - **[line_box_cache.py](line_box_cache.py)**  
-  独立的矢量线缓存模块，负责页面线段提取、缓存读写与预建缓存复用。
+  独立的矢量线缓存模块，负责页面线段提取、缓存读写，并支持直接批量扫描 `PDF_PATH` 下所有 PDF 预建缓存。
 - **[build_line_box_cache.py](build_line_box_cache.py)**  
-  批量预建缓存工具，可一次扫描 `PDF_PATH` 下所有 PDF 并生成矢量线缓存。
+  批量预建缓存兼容入口，内部复用 `line_box_cache.py` 的独立运行逻辑。
 - **[get_pdf_info.py](get_pdf_info.py)**  
   辅助工具，输出 PDF 每页的原始尺寸（Points），用于辅助配置 `config.yaml` 中的坐标范围。
 
@@ -58,7 +58,7 @@ GetLocInPdf/
 ├─ .env                        # 路径、DPI 等环境变量
 ├─ pdf_keyword_screenshot.py   # 公共截图核心
 ├─ line_box_cache.py           # 矢量线缓存与预建缓存核心
-├─ build_line_box_cache.py     # 批量为 PDF_PATH 下 PDF 预建矢量线缓存
+├─ build_line_box_cache.py     # 兼容入口，复用 line_box_cache.py 的批量缓存逻辑
 ├─ full_page_screenshot.py     # 全图截图入口
 ├─ region_screenshot.py        # 区域截图入口
 ├─ get_pdf_info.py             # 页面尺寸查看工具
@@ -104,7 +104,8 @@ GetLocInPdf/
 ### 2. 生成截图
 - 运行 `python full_page_screenshot.py` 生成全页/大区截图。
 - 运行 `python region_screenshot.py` 生成局部截图。
-- 如需提前预热缓存，运行 `python build_line_box_cache.py`，会递归扫描 `PDF_PATH` 下所有 PDF。
+- 如需提前预热缓存，运行 `python line_box_cache.py`，会递归扫描 `PDF_PATH` 下所有 PDF。
+- 如需兼容旧命令，`python build_line_box_cache.py` 仍然可用。
 
 ### 3. 在其他脚本中直接调用
 ```python

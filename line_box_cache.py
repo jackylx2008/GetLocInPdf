@@ -1,5 +1,6 @@
 """页面矢量线缓存与批量预建工具。"""
 
+import argparse
 import hashlib
 import json
 import logging
@@ -7,7 +8,7 @@ import os
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Sequence
+from typing import Any, Sequence
 
 import fitz
 
@@ -117,7 +118,11 @@ class LineCacheStore:
             with open(cache_path, "w", encoding="utf-8") as file:
                 json.dump(payload, file, ensure_ascii=True)
         except OSError:
-            logging.debug("矢量线缓存写入失败，将继续使用即时提取结果: %s", cache_path, exc_info=True)
+            logging.debug(
+                "矢量线缓存写入失败，将继续使用即时提取结果: %s",
+                cache_path,
+                exc_info=True,
+            )
 
     def _cache_path(
         self,
@@ -164,8 +169,12 @@ def collect_page_axis_lines(
     axis_tolerance: float,
     min_length: float,
 ) -> tuple[list[AxisAlignedLine], list[AxisAlignedLine]]:
-    vertical_lines: dict[tuple[str, float, float, float, str | None], AxisAlignedLine] = {}
-    horizontal_lines: dict[tuple[str, float, float, float, str | None], AxisAlignedLine] = {}
+    vertical_lines: dict[
+        tuple[str, float, float, float, str | None], AxisAlignedLine
+    ] = {}
+    horizontal_lines: dict[
+        tuple[str, float, float, float, str | None], AxisAlignedLine
+    ] = {}
 
     for drawing in page.get_drawings():
         layer = drawing.get("layer")
@@ -217,7 +226,9 @@ def get_page_axis_lines(
     cache_store: LineCacheStore,
     axis_tolerance: float,
     min_length: float,
-    memory_cache: dict[int, tuple[list[AxisAlignedLine], list[AxisAlignedLine]]] | None = None,
+    memory_cache: (
+        dict[int, tuple[list[AxisAlignedLine], list[AxisAlignedLine]]] | None
+    ) = None,
     force_rebuild: bool = False,
 ) -> tuple[tuple[list[AxisAlignedLine], list[AxisAlignedLine]], str]:
     page_number_value = page.number
@@ -329,4 +340,190 @@ def discover_pdf_files(pdf_dir: str) -> list[str]:
         raise FileNotFoundError(f"未找到 PDF 目录: {root.resolve()}")
     if not root.is_dir():
         raise NotADirectoryError(f"PDF 路径不是目录: {root.resolve()}")
-    return sorted(str(path) for path in root.rglob("*.pdf"))
+    return sorted(
+        str(path)
+        for path in root.rglob("*")
+        if path.is_file() and path.suffix.lower() == ".pdf"
+    )
+
+
+def load_runtime_config(config_path: str = "config.yaml") -> dict[str, Any]:
+    from dotenv import load_dotenv
+    import yaml
+
+    load_dotenv(dotenv_path="common.env")
+
+    with open(config_path, "r", encoding="utf-8") as file:
+        content = file.read()
+
+    for key, value in os.environ.items():
+        content = content.replace(f"${{{key}}}", value)
+
+    return yaml.safe_load(content)
+
+
+def parse_log_level(log_level_value: str | int | None) -> int:
+    if isinstance(log_level_value, int):
+        return log_level_value
+    if not log_level_value:
+        return logging.INFO
+
+    normalized_value = str(log_level_value).strip().upper()
+    return int(getattr(logging, normalized_value, logging.INFO))
+
+
+def warm_pdf_directory_line_cache(
+    pdf_dir: str,
+    cache_dir: str,
+    axis_tolerance: float,
+    min_length: float,
+    force_rebuild: bool = False,
+) -> dict[str, int | float | str]:
+    pdf_files = discover_pdf_files(pdf_dir)
+    if not pdf_files:
+        raise FileNotFoundError(
+            f"PDF 目录中未找到可处理的 .pdf 文件: {Path(pdf_dir).resolve()}"
+        )
+
+    logging.info("开始构建矢量线缓存，PDF 目录: %s", pdf_dir)
+    logging.info(
+        "命中参数: axis_tolerance=%s, min_length=%s", axis_tolerance, min_length
+    )
+    logging.info("缓存目录: %s", cache_dir)
+    logging.info("待处理 PDF 数量: %s", len(pdf_files))
+    if force_rebuild:
+        logging.info("已开启强制重建，将忽略现有磁盘缓存。")
+
+    total_pages = 0
+    total_built_pages = 0
+    total_disk_hit_pages = 0
+    started_at = time.perf_counter()
+
+    for pdf_path in pdf_files:
+        stats = build_pdf_line_cache(
+            pdf_path=pdf_path,
+            cache_dir=cache_dir,
+            axis_tolerance=axis_tolerance,
+            min_length=min_length,
+            force_rebuild=force_rebuild,
+        )
+        total_pages += int(stats["pages"])
+        total_built_pages += int(stats["built_pages"])
+        total_disk_hit_pages += int(stats["disk_hit_pages"])
+        logging.info(
+            "完成 PDF: %s | 页数=%s, 新建缓存=%s, 已有缓存=%s, 耗时=%.2fs",
+            os.path.basename(str(stats["pdf_path"])),
+            stats["pages"],
+            stats["built_pages"],
+            stats["disk_hit_pages"],
+            stats["elapsed_seconds"],
+        )
+
+    elapsed = time.perf_counter() - started_at
+    logging.info(
+        "全部完成，共处理 %s 个 PDF、%s 页；新建缓存 %s 页，复用缓存 %s 页。",
+        len(pdf_files),
+        total_pages,
+        total_built_pages,
+        total_disk_hit_pages,
+    )
+
+    return {
+        "pdf_dir": os.path.abspath(pdf_dir),
+        "pdf_count": len(pdf_files),
+        "pages": total_pages,
+        "built_pages": total_built_pages,
+        "disk_hit_pages": total_disk_hit_pages,
+        "elapsed_seconds": elapsed,
+    }
+
+
+def build_cli_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description="批量为 PDF 目录预建页面矢量线缓存。")
+    parser.add_argument(
+        "--config",
+        default="config.yaml",
+        help="配置文件路径，默认使用 config.yaml。",
+    )
+    parser.add_argument(
+        "--pdf-dir",
+        help="待扫描的 PDF 目录，未提供时读取 config.yaml / common.env 中的 PDF_PATH。",
+    )
+    parser.add_argument(
+        "--cache-dir",
+        help="缓存目录，未提供时读取 pdf.region_line_cache_dir。",
+    )
+    parser.add_argument(
+        "--axis-tolerance",
+        type=float,
+        help="垂直 / 水平线判定容差，未提供时读取 pdf.region_line_axis_tolerance。",
+    )
+    parser.add_argument(
+        "--min-length",
+        type=float,
+        help="参与缓存的最短线段长度，未提供时读取 pdf.region_line_min_length。",
+    )
+    parser.add_argument(
+        "--log-level",
+        help="日志级别，例如 INFO / DEBUG，未提供时读取 LOG_LEVEL。",
+    )
+    parser.add_argument(
+        "--force-rebuild",
+        action="store_true",
+        help="忽略现有磁盘缓存并强制重建。",
+    )
+    return parser
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    args = build_cli_parser().parse_args(argv)
+    config = load_runtime_config(args.config)
+    pdf_config = config.get("pdf", {})
+
+    log_level = parse_log_level(
+        args.log_level or config.get("log_level") or os.environ.get("LOG_LEVEL")
+    )
+    from logging_config import setup_logger
+
+    setup_logger(log_level=log_level)
+
+    pdf_dir = args.pdf_dir or pdf_config.get("path") or os.environ.get("PDF_PATH")
+    if not pdf_dir:
+        logging.error(
+            "未配置 PDF 目录，请通过 --pdf-dir、环境变量 PDF_PATH 或 config.yaml 的 pdf.path 提供目录路径。"
+        )
+        return 1
+
+    cache_dir = args.cache_dir or pdf_config.get(
+        "region_line_cache_dir", "cache/line_boxes"
+    )
+    axis_tolerance_value = (
+        args.axis_tolerance
+        if args.axis_tolerance is not None
+        else pdf_config.get("region_line_axis_tolerance", 0.5)
+    )
+    min_length_value = (
+        args.min_length
+        if args.min_length is not None
+        else pdf_config.get("region_line_min_length", 20.0)
+    )
+    axis_tolerance = float(axis_tolerance_value)
+    min_length = float(min_length_value)
+
+    try:
+        warm_pdf_directory_line_cache(
+            pdf_dir=pdf_dir,
+            cache_dir=cache_dir,
+            axis_tolerance=axis_tolerance,
+            min_length=min_length,
+            force_rebuild=args.force_rebuild,
+        )
+    except (FileNotFoundError, NotADirectoryError, ValueError) as exc:
+        logging.error("%s", exc)
+        return 1
+
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
